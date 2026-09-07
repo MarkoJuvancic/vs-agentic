@@ -621,6 +621,12 @@ function addMessage(id, type, dataJson) {
                 thumb.addEventListener('click', function() {
                     this.classList.toggle('expanded');
                 });
+                // A thumbnail has no height until it decodes, so the scroll
+                // that follows the prompt runs against a container that is
+                // still too short. Land on the bottom again once it does.
+                thumb.addEventListener('load', function() {
+                    if (!_userScrolledUp) scrollToBottom();
+                });
                 strip.appendChild(thumb);
             }
             div.appendChild(strip);
