@@ -235,6 +235,13 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         });
 
         var provider = services.BuildServiceProvider();
+
+        // ChatWebView is instantiated by XAML, so it gets its logger handed to
+        // it rather than injected.
+        var loggerFactory = provider.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
+        if (loggerFactory is not null)
+            VsAgentic.UI.Controls.ChatWebView.Logger = loggerFactory.CreateLogger("VsAgentic.UI.Controls.ChatWebView");
+
         var chatService = provider.GetRequiredService<IChatService>();
         var optionsAccessor = provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<VsAgentic.Services.Configuration.VsAgenticOptions>>();
         var permissionBroker = provider.GetRequiredService<VsAgentic.Services.ClaudeCli.Permissions.IPermissionBroker>();
@@ -378,6 +385,19 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
                     // Link the view model to its session entry so cost updates flow back to the list
                     viewModel.SessionInfo = session;
+                    viewModel.HasCustomTitle = session.HasCustomTitle;
+
+                    // A rename in the session list flows into the open window:
+                    // caption and generated-title suppression follow the new name.
+                    System.ComponentModel.PropertyChangedEventHandler onSessionChanged = (_, e) =>
+                    {
+                        if (e.PropertyName != nameof(SessionInfo.Name)) return;
+                        if (viewModel.SessionTitle == session.Name) return;
+
+                        viewModel.HasCustomTitle = session.HasCustomTitle;
+                        viewModel.SessionTitle = session.Name;
+                    };
+                    session.PropertyChanged += onSessionChanged;
 
                     // Sync generated title back to session list (plain title)
                     // and window caption (animated DisplayTitle with activity
@@ -405,6 +425,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                     chatWindow.Closed += () =>
                     {
                         _instance?._sessionWindowMap.Remove(session.Id);
+                        session.PropertyChanged -= onSessionChanged;
                         session.IsActive = false;
                         viewModel.Dispose();
                     };
