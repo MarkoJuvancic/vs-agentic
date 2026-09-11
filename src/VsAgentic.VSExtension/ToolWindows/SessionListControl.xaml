@@ -131,17 +131,19 @@
             </Setter>
         </Style>
 
-        <!-- Delete button: transparent pill, shown on row hover, overlaid above text -->
-        <Style x:Key="DeleteButtonStyle" TargetType="Button">
+        <!-- Row action button (rename, delete): transparent pill, shown on row
+             hover, overlaid above the text. Visibility is driven by the row
+             action strip, not by the button itself. -->
+        <Style x:Key="RowActionButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="4,2" />
-            <Setter Property="Margin" Value="0" />
+            <Setter Property="Margin" Value="2,0,0,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="HorizontalAlignment" Value="Right" />
             <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="Visibility" Value="Hidden" />
-            <Setter Property="ToolTip" Value="Delete session" />
+            <!-- Clicking an action selects the row; that must not also open the
+                 session window. -->
+            <EventSetter Event="PreviewMouseLeftButtonDown" Handler="RowAction_PreviewMouseLeftButtonDown" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -219,15 +221,47 @@
                  SelectedItem="{Binding SelectedSession}"
                  SelectionChanged="ListBox_SelectionChanged"
                  MouseDoubleClick="ListBox_MouseDoubleClick"
+                 PreviewMouseLeftButtonUp="ListBox_PreviewMouseLeftButtonUp"
+                 PreviewKeyDown="ListBox_PreviewKeyDown"
                  ItemContainerStyle="{StaticResource FluentListBoxItemStyle}"
                  Margin="4,0,4,4">
             <ListBox.ItemTemplate>
                 <DataTemplate>
-                    <Grid Cursor="Hand" Margin="6,4">
+                    <!-- Tag carries the list view model so the context menu,
+                         which lives outside the visual tree, can reach its
+                         commands. -->
+                    <Grid Cursor="Hand" Margin="6,4"
+                          Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}">
+                        <Grid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Rename"
+                                          Command="{Binding PlacementTarget.Tag.BeginRenameCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                <MenuItem Header="Delete"
+                                          Command="{Binding PlacementTarget.Tag.RemoveSessionCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                            </ContextMenu>
+                        </Grid.ContextMenu>
+
                         <StackPanel>
-                            <TextBlock Text="{Binding Name, Mode=OneWay}"
-                                       FontWeight="SemiBold" FontSize="13"
-                                       TextTrimming="CharacterEllipsis" />
+                            <Grid>
+                                <TextBlock x:Name="NameText"
+                                           Text="{Binding Name, Mode=OneWay}"
+                                           FontWeight="SemiBold" FontSize="13"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBox x:Name="RenameBox"
+                                         Visibility="Collapsed"
+                                         Style="{StaticResource FluentTextBoxStyle}"
+                                         Text="{Binding EditingName, UpdateSourceTrigger=PropertyChanged}"
+                                         FontWeight="SemiBold" FontSize="13"
+                                         Padding="3,1"
+                                         Background="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBackgroundKey}}"
+                                         Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"
+                                         BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                                         IsVisibleChanged="RenameBox_IsVisibleChanged"
+                                         KeyDown="RenameBox_KeyDown"
+                                         LostKeyboardFocus="RenameBox_LostKeyboardFocus" />
+                            </Grid>
                             <TextBlock FontSize="11" Opacity="0.7"
                                        TextTrimming="CharacterEllipsis">
                                 <Run Text="Last activity " />
@@ -235,17 +269,35 @@
                             </TextBlock>
                         </StackPanel>
 
-                        <Button x:Name="DeleteButton"
-                                Style="{StaticResource DeleteButtonStyle}"
-                                Command="{Binding DataContext.RemoveSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                CommandParameter="{Binding}">
-                            <imaging:CrispImage Width="16" Height="16"
-                                                Moniker="{x:Static catalog:KnownMonikers.Trash}" />
-                        </Button>
+                        <StackPanel x:Name="RowActions"
+                                    Orientation="Horizontal"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center"
+                                    Visibility="Hidden">
+                            <Button Style="{StaticResource RowActionButtonStyle}"
+                                    ToolTip="Rename session"
+                                    Command="{Binding DataContext.BeginRenameCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                    CommandParameter="{Binding}">
+                                <imaging:CrispImage Width="16" Height="16"
+                                                    Moniker="{x:Static catalog:KnownMonikers.Rename}" />
+                            </Button>
+                            <Button Style="{StaticResource RowActionButtonStyle}"
+                                    ToolTip="Delete session"
+                                    Command="{Binding DataContext.RemoveSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                    CommandParameter="{Binding}">
+                                <imaging:CrispImage Width="16" Height="16"
+                                                    Moniker="{x:Static catalog:KnownMonikers.Trash}" />
+                            </Button>
+                        </StackPanel>
                     </Grid>
                     <DataTemplate.Triggers>
                         <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                            <Setter TargetName="DeleteButton" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="RowActions" Property="Visibility" Value="Visible" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsRenaming}" Value="True">
+                            <Setter TargetName="NameText" Property="Visibility" Value="Collapsed" />
+                            <Setter TargetName="RenameBox" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="RowActions" Property="Visibility" Value="Collapsed" />
                         </DataTrigger>
                     </DataTemplate.Triggers>
                 </DataTemplate>
