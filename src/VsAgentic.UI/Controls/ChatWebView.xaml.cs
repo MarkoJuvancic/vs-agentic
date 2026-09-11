@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Web.WebView2.Core;
 using VsAgentic.Services.Abstractions;
 using VsAgentic.UI.ViewModels;
@@ -18,6 +22,19 @@ public partial class ChatWebView : UserControl
     /// The string argument is the raw path (possibly with :line suffix).
     /// </summary>
     public static event Action<string>? FileOpenRequested;
+
+    /// <summary>
+    /// Set by the host once its DI container is up. The control is created by
+    /// XAML, so there is nothing to inject into — static, like
+    /// <see cref="FileOpenRequested"/>. Defaults to a no-op logger.
+    /// </summary>
+    public static ILogger Logger { get; set; } = NullLogger.Instance;
+
+    /// <summary>
+    /// How long a user data folder survives once its owner can no longer be
+    /// confirmed. See <see cref="IsTooOld"/>.
+    /// </summary>
+    private const int StaleFolderMaxAgeDays = 7;
 
     private bool _isWebViewReady;
     private readonly ConcurrentQueue<Func<Task>> _pendingOps = new();
@@ -40,10 +57,7 @@ public partial class ChatWebView : UserControl
     {
         try
         {
-            var userDataFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VsAgentic", "WebView2");
-            var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
+            var env = await CreateEnvironmentAsync();
             await WebView.EnsureCoreWebView2Async(env);
             WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             WebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
@@ -58,7 +72,159 @@ public partial class ChatWebView : UserControl
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"ChatWebView init failed: {ex.Message}");
+            // Nothing renders when this fails, and the symptom (an empty chat
+            // pane next to a perfectly healthy CLI session) gives no hint as to
+            // why — so this has to reach the log file, not just the debugger.
+            Logger.LogError(ex, "[ChatWebView] WebView2 initialization failed; the chat pane will stay empty.");
+        }
+    }
+
+    /// <summary>
+    /// Creates the WebView2 environment on a user data folder scoped to this
+    /// process, so no two hosts ever contend for the same one.
+    /// </summary>
+    private static async Task<CoreWebView2Environment> CreateEnvironmentAsync()
+    {
+        var baseFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VsAgentic", "WebView2");
+
+        // A user data folder belongs to one process at a time. Pointing a
+        // second host at a folder another process already owns does not fail
+        // where you would expect it to: CoreWebView2Environment.CreateAsync
+        // still succeeds, and only CreateCoreWebView2Controller then fails with
+        // HRESULT_FROM_WIN32(ERROR_INVALID_STATE). The chat pane is left empty
+        // next to a CLI session that is working perfectly, which is a hard
+        // symptom to place.
+        //
+        // Scoping the folder to the process removes the contention entirely,
+        // and costs nothing: the chat is handed to the control through
+        // NavigateToString with its HTML, CSS and JS inlined, so a shared
+        // browser cache has nothing to carry between hosts.
+        //
+        // The folder carries the process start time as well as the id, because
+        // Windows reuses ids. Without the start time a folder whose id has been
+        // handed to an unrelated process looks owned for as long as that process
+        // lives, and is never reclaimed; and a host can inherit the profile of a
+        // predecessor that crashed with the same id, stale lock file included.
+        // The time is a UTC file time: StartTime is Kind=Local, so ticks taken
+        // either side of a DST shift would not compare equal.
+        using var process = Process.GetCurrentProcess();
+        var processFolder = $"{baseFolder}.p{process.Id}.t{process.StartTime.ToFileTimeUtc():x16}";
+        PurgeStaleProcessFolders(baseFolder);
+        return await CoreWebView2Environment.CreateAsync(null, processFolder);
+    }
+
+    /// <summary>
+    /// Deletes folders left behind by hosts that are no longer running. Each one
+    /// is a full browser profile, so they are not cheap to keep around.
+    /// Best effort — a folder still held by a live process is simply skipped.
+    /// </summary>
+    private static void PurgeStaleProcessFolders(string baseFolder)
+    {
+        try
+        {
+            var parent = Path.GetDirectoryName(baseFolder);
+            if (parent is null || !Directory.Exists(parent)) return;
+
+            var prefix = Path.GetFileName(baseFolder) + ".p";
+
+            foreach (var candidate in Directory.GetDirectories(parent, prefix + "*"))
+            {
+                var suffix = Path.GetFileName(candidate).Substring(prefix.Length);
+                if (!TryParseOwner(suffix, out var processId, out var startTicks)) continue;
+                if (IsOwnerAlive(processId, startTicks)) continue;
+
+                try
+                {
+                    Directory.Delete(candidate, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "[ChatWebView] Could not delete stale WebView2 folder '{Folder}'.", candidate);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "[ChatWebView] Purge of stale WebView2 folders failed.");
+        }
+    }
+
+    /// <summary>
+    /// Reads the owning process out of a folder name suffix, which is either
+    /// "{id}.t{startTicks:x16}" or the bare "{id}" written by earlier builds of
+    /// this branch. A bare id leaves <paramref name="startTicks"/> at 0, meaning
+    /// the start time is unknown.
+    /// </summary>
+    private static bool TryParseOwner(string suffix, out int processId, out long startTicks)
+    {
+        processId = 0;
+        startTicks = 0;
+
+        var separator = suffix.IndexOf(".t", StringComparison.Ordinal);
+        if (separator < 0) return int.TryParse(suffix, out processId);
+
+        return int.TryParse(suffix.Substring(0, separator), out processId)
+            && long.TryParse(
+                suffix.Substring(separator + 2),
+                NumberStyles.HexNumber,
+                CultureInfo.InvariantCulture,
+                out startTicks);
+    }
+
+    /// <summary>
+    /// Whether the process that created a folder is still running, and so still
+    /// owns it. The id alone cannot answer that, since Windows reuses ids — the
+    /// start time is what settles it.
+    /// </summary>
+    private static bool IsOwnerAlive(int processId, long startTicks)
+    {
+        try
+        {
+            using var owner = Process.GetProcessById(processId);
+
+            // Written before the start time went into the name: the id is all
+            // there is to go on, so treat the folder as owned.
+            if (startTicks == 0) return true;
+
+            return owner.StartTime.ToFileTimeUtc() == startTicks;
+        }
+        catch (ArgumentException)
+        {
+            // No such process — the folder is orphaned.
+            return false;
+        }
+        catch (Exception ex)
+        {
+            // StartTime throws Win32Exception when another user owns the process,
+            // or when it runs elevated and we do not, and InvalidOperationException
+            // when it exits mid-check. Ownership is unknown, so keep the folder
+            // until it is old enough that no live owner is credible.
+            Logger.LogDebug(
+                ex, "[ChatWebView] Could not confirm the owner of the WebView2 folder for process {ProcessId}.", processId);
+            return !IsTooOld(startTicks);
+        }
+    }
+
+    /// <summary>
+    /// Whether a folder is older than <see cref="StaleFolderMaxAgeDays"/>. Only
+    /// consulted when the owner cannot be confirmed: without this, a folder we
+    /// are not allowed to ask about stays on disk for good. Names are now unique
+    /// per run rather than drawn from the small set of process ids, so nothing
+    /// else puts a ceiling on what accumulates.
+    /// </summary>
+    private static bool IsTooOld(long startTicks)
+    {
+        try
+        {
+            return DateTime.UtcNow - DateTime.FromFileTimeUtc(startTicks)
+                > TimeSpan.FromDays(StaleFolderMaxAgeDays);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Not a file time this code wrote. Leave the folder alone.
+            return false;
         }
     }
 
@@ -88,7 +254,7 @@ public partial class ChatWebView : UserControl
             try { await op(); }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"ChatWebView queued op failed: {ex.Message}");
+                Logger.LogWarning(ex, "[ChatWebView] Queued script operation failed.");
             }
         }
     }
@@ -191,7 +357,7 @@ public partial class ChatWebView : UserControl
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"ChatWebView script failed: {ex.Message}");
+            Logger.LogWarning(ex, "[ChatWebView] Script execution failed: {Script}", script);
         }
     }
 }
