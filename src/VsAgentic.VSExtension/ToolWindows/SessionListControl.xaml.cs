@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -102,6 +103,30 @@ public partial class SessionListControl : UserControl
 
     private void RowAction_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         => _suppressOpenOnSelection = true;
+
+    private void RowMenuButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+
+        // The row owns the menu; the button only drops it below itself, the
+        // way a "..." overflow reads elsewhere.
+        var menu = FindAncestorContextMenu(button);
+        if (menu is null) return;
+
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    private static ContextMenu? FindAncestorContextMenu(DependencyObject start)
+    {
+        for (DependencyObject? node = start; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (node is FrameworkElement element && element.ContextMenu is not null)
+                return element.ContextMenu;
+        }
+        return null;
+    }
 
     private void RenameBox_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
     {

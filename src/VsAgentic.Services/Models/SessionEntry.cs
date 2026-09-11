@@ -12,6 +12,11 @@ public class SessionEntry
     /// </summary>
     public bool TitleIsCustom { get; set; }
 
+    /// <summary>
+    /// Pinned sessions are listed above the rest, regardless of activity.
+    /// </summary>
+    public bool IsPinned { get; set; }
+
     public int Ordinal { get; set; }
     public DateTime CreatedUtc { get; set; }
     public DateTime LastActivityUtc { get; set; }
