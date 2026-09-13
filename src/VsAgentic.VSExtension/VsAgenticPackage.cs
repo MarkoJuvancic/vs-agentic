@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using VsAgentic.Services.Abstractions;
 using VsAgentic.Services.DependencyInjection;
 using VsAgentic.Services.Services;
@@ -43,6 +44,8 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
     private static readonly SemaphoreSlim _openSessionGate = new(1, 1);
     private int _nextWindowId;
     private uint _solutionEventsCookie;
+    private Action<double>? _persistZoom;
+    private DispatcherTimer? _zoomSaveTimer;
 
     public static bool IsLoaded => _instance is not null;
 
@@ -86,6 +89,8 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         // Listen for file-open requests from rendered markdown
         ChatWebView.FileOpenRequested += OnFileOpenRequested;
 
+        InitializeZoom();
+
         // Listen for solution open/close/switch events
         if (await GetServiceAsync(typeof(SVsSolution)) is IVsSolution solutionService)
         {
@@ -106,6 +111,54 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             }
             catch (OperationCanceledException) { }
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Seeds the shared chat zoom from the persisted setting and writes every
+    /// later change straight back. Zoom is set from the chat window rather than
+    /// from Tools → Options, so nothing else would ever save it.
+    /// </summary>
+    private void InitializeZoom()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        var optionsPage = (VsAgenticOptionsPage?)GetDialogPage(typeof(VsAgenticOptionsPage));
+        if (optionsPage is null) return;
+
+        ChatZoom.Initialize(optionsPage.ZoomPercent / 100.0);
+
+        // Coalesced rather than written per step: SaveSettingsToStorage
+        // reflects over the whole page and hits the settings store, and one
+        // spin of the wheel is a dozen steps. Writing inline would stutter the
+        // very gesture this feature exists for.
+        _zoomSaveTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(500)
+        };
+        _zoomSaveTimer.Tick += (_, _) => SaveZoomSetting(optionsPage);
+
+        _persistZoom = _ =>
+        {
+            _zoomSaveTimer.Stop();
+            _zoomSaveTimer.Start();
+        };
+        ChatZoom.Changed += _persistZoom;
+    }
+
+    private void SaveZoomSetting(VsAgenticOptionsPage optionsPage)
+    {
+        _zoomSaveTimer?.Stop();
+
+        try
+        {
+            optionsPage.ZoomPercent = (int)Math.Round(ChatZoom.Level * 100);
+            optionsPage.SaveSettingsToStorage();
+        }
+        catch (Exception ex)
+        {
+            // Worst case the level is forgotten at the next restart.
+            System.Diagnostics.Debug.WriteLine($"VsAgentic: Failed to persist zoom: {ex}");
+        }
     }
 
     private async Task InitializeSessionPersistenceAsync()
@@ -182,6 +235,13 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         });
 
         var provider = services.BuildServiceProvider();
+
+        // ChatWebView is instantiated by XAML, so it gets its logger handed to
+        // it rather than injected.
+        var loggerFactory = provider.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
+        if (loggerFactory is not null)
+            VsAgentic.UI.Controls.ChatWebView.Logger = loggerFactory.CreateLogger("VsAgentic.UI.Controls.ChatWebView");
+
         var chatService = provider.GetRequiredService<IChatService>();
         var optionsAccessor = provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<VsAgentic.Services.Configuration.VsAgenticOptions>>();
         var permissionBroker = provider.GetRequiredService<VsAgentic.Services.ClaudeCli.Permissions.IPermissionBroker>();
@@ -325,6 +385,19 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
                     // Link the view model to its session entry so cost updates flow back to the list
                     viewModel.SessionInfo = session;
+                    viewModel.HasCustomTitle = session.HasCustomTitle;
+
+                    // A rename in the session list flows into the open window:
+                    // caption and generated-title suppression follow the new name.
+                    System.ComponentModel.PropertyChangedEventHandler onSessionChanged = (_, e) =>
+                    {
+                        if (e.PropertyName != nameof(SessionInfo.Name)) return;
+                        if (viewModel.SessionTitle == session.Name) return;
+
+                        viewModel.HasCustomTitle = session.HasCustomTitle;
+                        viewModel.SessionTitle = session.Name;
+                    };
+                    session.PropertyChanged += onSessionChanged;
 
                     // Sync generated title back to session list (plain title)
                     // and window caption (animated DisplayTitle with activity
@@ -352,6 +425,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                     chatWindow.Closed += () =>
                     {
                         _instance?._sessionWindowMap.Remove(session.Id);
+                        session.PropertyChanged -= onSessionChanged;
                         session.IsActive = false;
                         viewModel.Dispose();
                     };
@@ -539,6 +613,21 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         if (disposing)
         {
             ChatWebView.FileOpenRequested -= OnFileOpenRequested;
+
+            if (_persistZoom is not null)
+            {
+                ChatZoom.Changed -= _persistZoom;
+                _persistZoom = null;
+            }
+
+            // A zoom step in the last half-second still has its write pending;
+            // flush it rather than lose it on the way out.
+            if (_zoomSaveTimer is { IsEnabled: true }
+                && GetDialogPage(typeof(VsAgenticOptionsPage)) is VsAgenticOptionsPage optionsPage)
+            {
+                SaveZoomSetting(optionsPage);
+            }
+            _zoomSaveTimer?.Stop();
 
             if (_solutionEventsCookie != 0)
             {
