@@ -135,10 +135,20 @@ public partial class ChatWebView : UserControl
         // predecessor that crashed with the same id, stale lock file included.
         // The time is a UTC file time: StartTime is Kind=Local, so ticks taken
         // either side of a DST shift would not compare equal.
-        using var process = Process.GetCurrentProcess();
-        var processFolder = $"{baseFolder}.p{process.Id}.t{process.StartTime.ToFileTimeUtc():x16}";
+        var processFolder = ProcessScopedFolder(baseFolder);
         PurgeStaleProcessFolders(baseFolder);
         return await CoreWebView2Environment.CreateAsync(null, processFolder);
+    }
+
+    /// <summary>
+    /// Names a folder after the running process, as
+    /// "{baseFolder}.p{id}.t{startTicks:x16}" — the form
+    /// <see cref="PurgeStaleProcessFolders"/> reads back.
+    /// </summary>
+    private static string ProcessScopedFolder(string baseFolder)
+    {
+        using var process = Process.GetCurrentProcess();
+        return $"{baseFolder}.p{process.Id}.t{process.StartTime.ToFileTimeUtc():x16}";
     }
 
     /// <summary>
@@ -266,14 +276,22 @@ public partial class ChatWebView : UserControl
     {
         try
         {
-            // Scoped to the process and cleared on start: this is a render cache,
-            // not storage. The session folder keeps the copies that matter.
-            _imageFolder = Path.Combine(
+            // A render cache, not storage: the session folder keeps the copies
+            // that matter. Scoped to this control rather than to the process,
+            // because every chat window has a control of its own — with one
+            // folder per process, a second window opening would clear the files
+            // the first is still serving. A fresh folder per control means there
+            // is never anything to clear.
+            //
+            // The control folders sit under a process folder named as for the
+            // user data folder, so the same purge reclaims what hosts that are
+            // no longer running left behind.
+            var baseFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VsAgentic", "WebView2Images", $"p{Process.GetCurrentProcess().Id}");
+                "VsAgentic", "WebView2Images");
+            PurgeStaleProcessFolders(baseFolder);
 
-            if (Directory.Exists(_imageFolder))
-                Directory.Delete(_imageFolder, recursive: true);
+            _imageFolder = Path.Combine(ProcessScopedFolder(baseFolder), Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_imageFolder);
 
             // DenyCors, not Deny: the page comes from NavigateToString, so its
@@ -286,8 +304,10 @@ public partial class ChatWebView : UserControl
         }
         catch (Exception ex)
         {
+            // Images then go to the page inline as data URIs, and a large one
+            // can take the browser process down with it — see ImageHost.
             _imageFolder = null;
-            System.Diagnostics.Debug.WriteLine($"ChatWebView image host mapping failed: {ex.Message}");
+            Logger.LogError(ex, "[ChatWebView] Image host mapping failed; images will be sent inline.");
         }
     }
 
@@ -359,7 +379,7 @@ public partial class ChatWebView : UserControl
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"ChatWebView image write failed: {ex.Message}");
+            Logger.LogWarning(ex, "[ChatWebView] Could not write an image to the image host folder; sending it inline.");
             return null;
         }
     }
