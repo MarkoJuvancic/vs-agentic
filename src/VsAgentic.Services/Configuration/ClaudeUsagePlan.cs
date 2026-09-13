@@ -4,8 +4,8 @@ namespace VsAgentic.Services.Configuration;
 
 /// <summary>
 /// The subscription the user is on. This exists only to size the rate-limit
-/// meter in the chat header — nothing here is sent to the CLI, and picking the
-/// wrong one changes no behaviour beyond how full that meter looks.
+/// readings in the chat status bar — nothing here is sent to the CLI, and picking
+/// the wrong one changes no behaviour beyond what those readings say.
 /// </summary>
 public enum ClaudeUsagePlan
 {

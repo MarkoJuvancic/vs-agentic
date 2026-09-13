@@ -57,7 +57,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private long _cacheReadTokens;
     private long _cacheCreationTokens;
     private long _contextTokens;
-    private string? _modelId;
+
+    private string? _currentModel;
 
     // The CLI can emit more than one assistant event carrying the same message
     // id (the usage block is repeated verbatim on each). Counting per id rather
@@ -262,13 +263,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         // The alias we pass to --model resolves server-side, so this init event
         // is the only place that names the model actually serving the session —
-        // and with it the context window the meter measures against.
-        if (evt.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String)
-        {
-            lock (_usageLock) { _modelId = model.GetString(); }
-            _logger.LogInformation("[ClaudeCli] Model: {Model}", _modelId);
-            RaiseUsageChanged();
-        }
+        // and the only place the [1m] variants announce themselves. It can differ
+        // between process starts (a model switch, a changed default), so raise on
+        // every change.
+        if (evt.TryGetProperty("model", out var modelProp) && modelProp.ValueKind == JsonValueKind.String)
+            SetCurrentModel(modelProp.GetString());
         // Diagnostic: dump the available tool names so we can verify whether
         // AskUserQuestion is registered in headless mode.
         if (evt.TryGetProperty("tools", out var tools) && tools.ValueKind == JsonValueKind.Array)
@@ -850,7 +849,6 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     public SessionUsage GetUsage()
     {
         long input, output, cacheRead, cacheCreate, context;
-        string? modelId;
 
         lock (_usageLock)
         {
@@ -859,7 +857,6 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             cacheRead = _cacheReadTokens;
             cacheCreate = _cacheCreationTokens;
             context = _contextTokens;
-            modelId = _modelId;
         }
 
         var (shortTotal, longTotal) = _usageLog.Totals(
@@ -872,14 +869,34 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             CacheReadTokens = cacheRead,
             CacheCreationTokens = cacheCreate,
             ContextTokens = context,
-            ContextWindowTokens = ClaudeModelCatalog.ContextWindowFor(modelId),
             ShortWindowTokens = shortTotal,
             LongWindowTokens = longTotal,
             ShortWindowBudget = _options.EffectiveFiveHourBudget,
             LongWindowBudget = _options.EffectiveWeeklyBudget,
             CostUsd = _cumulativeCostUsd > 0 ? _cumulativeCostUsd : null,
-            ModelId = modelId,
         };
+    }
+
+    public string? CurrentModel => _currentModel;
+
+    public string? CliSessionId => _cliSessionId;
+
+    public event Action<string?>? ModelChanged;
+
+    private void SetCurrentModel(string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model)) model = null;
+        if (string.Equals(model, _currentModel, StringComparison.Ordinal)) return;
+
+        _currentModel = model;
+        _logger.LogInformation("[ClaudeCli] Session model: {Model}", model ?? "(unknown)");
+
+        try { ModelChanged?.Invoke(model); }
+        catch (Exception ex)
+        {
+            // Same reasoning as UsageChanged: the dispatcher loop comes first.
+            _logger.LogError(ex, "[ClaudeCli] ModelChanged handler threw");
+        }
     }
 
     public event Action<SessionUsage>? UsageChanged;
@@ -900,8 +917,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     public void ApplyModelAndEffort(string modelAlias, ClaudeEffort effort)
     {
         var alias = (modelAlias ?? "").Trim();
-        if (string.Equals(_options.Model, alias, StringComparison.OrdinalIgnoreCase)
-            && _options.Effort == effort)
+        var modelChanged = !string.Equals(_options.Model, alias, StringComparison.OrdinalIgnoreCase);
+        if (!modelChanged && _options.Effort == effort)
         {
             return;
         }
@@ -926,7 +943,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _logger.LogError(ex, "[ClaudeCli] Failed to stop CLI after a model/effort change");
         }
 
-        RaiseUsageChanged();
+        // The model reported so far no longer describes what the next turn runs
+        // on. Clearing it lets the host fall back to its preview until the new
+        // process reports the real one.
+        if (modelChanged)
+            SetCurrentModel(null);
     }
 
     public void ClearHistory()
@@ -939,19 +960,22 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _inputTokens = _outputTokens = _cacheReadTokens = _cacheCreationTokens = 0;
             _contextTokens = 0;
             _countedMessageIds.Clear();
-            // _modelId survives: the next process reports it again on init, and
-            // keeping it means the context meter has a sane window in between.
         }
 
         _host.Stop();
         lock (_dispatcherLock) { _dispatcherTask = null; }
         _logger.LogInformation("[ClaudeCli] Session cleared (process killed)");
+        SetCurrentModel(null);
         RaiseUsageChanged();
     }
 
     public string SerializeHistory()
     {
-        return JsonSerializer.Serialize(new { cliSessionId = _cliSessionId });
+        // The model is persisted alongside the session id because --resume keeps a
+        // session on the model it was created with, so the configured default is
+        // not a valid stand-in when this session is reopened later. It is also the
+        // only record of a [1m] variant: the CLI's transcript names the bare model.
+        return JsonSerializer.Serialize(new { cliSessionId = _cliSessionId, model = _currentModel });
     }
 
     public void RestoreHistory(string serializedHistory)
@@ -964,6 +988,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 _cliSessionId = sid.GetString();
                 _logger.LogInformation("[ClaudeCli] Restored session: {SessionId}", _cliSessionId);
             }
+
+            // Sessions saved before this field existed do not have it; the host
+            // then falls back to reading the CLI's transcript.
+            if (doc.RootElement.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String)
+                SetCurrentModel(m.GetString());
         }
         catch (JsonException)
         {

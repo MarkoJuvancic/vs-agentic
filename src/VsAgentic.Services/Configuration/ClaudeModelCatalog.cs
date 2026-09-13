@@ -5,19 +5,19 @@ using System.Linq;
 namespace VsAgentic.Services.Configuration;
 
 /// <summary>
-/// Reasoning effort for a session, mapping 1:1 onto the CLI's <c>--effort</c>
-/// levels.
+/// Reasoning effort for a session. Every member except <see cref="Default"/>
+/// maps 1:1 onto a level of the CLI's <c>--effort</c>.
 ///
-/// There is deliberately no "default" member. The CLI does not report the
+/// <see cref="Default"/> sends no flag at all. The CLI does not report the
 /// effort it is running with — its <c>system/init</c> event names the model,
-/// the permission mode and the output style, but not this — so a "default"
-/// selection would be a value the header could never truthfully display. The
-/// extension therefore always passes the flag: whatever the dropdown shows is
-/// what the next turn will run with, by construction. The cost is that a level
-/// configured elsewhere in the user's own CLI settings is overridden.
+/// the permission mode and the output style, but not this — so the dropdown
+/// cannot name the level in force then. That is accepted: a CLI older than
+/// <c>--effort</c> fails to start when it is passed, and an effort configured in
+/// the user's own CLI settings stays in charge.
 /// </summary>
 public enum ClaudeEffort
 {
+    Default,
     Low,
     Medium,
     High,
@@ -27,7 +27,10 @@ public enum ClaudeEffort
 
 public static class ClaudeEffortExtensions
 {
-    /// <summary>The spelling <c>--effort</c> expects.</summary>
+    /// <summary>
+    /// The spelling <c>--effort</c> expects. Not meaningful for
+    /// <see cref="ClaudeEffort.Default"/>, which sends no flag.
+    /// </summary>
     public static string ToCliValue(this ClaudeEffort effort) => effort switch
     {
         ClaudeEffort.Low => "low",
@@ -35,16 +38,6 @@ public static class ClaudeEffortExtensions
         ClaudeEffort.XHigh => "xhigh",
         ClaudeEffort.Max => "max",
         _ => "high",
-    };
-
-    /// <summary>Short label for the header dropdown.</summary>
-    public static string ToDisplayName(this ClaudeEffort effort) => effort switch
-    {
-        ClaudeEffort.Low => "Low",
-        ClaudeEffort.Medium => "Medium",
-        ClaudeEffort.XHigh => "XHigh",
-        ClaudeEffort.Max => "Max",
-        _ => "High",
     };
 }
 
@@ -81,7 +74,7 @@ public static class ClaudeModelCatalog
     public const int LongContextWindowTokens = 1_000_000;
 
     /// <summary>
-    /// Aliases offered in the header dropdown. These are the aliases the CLI
+    /// Aliases offered in the model dropdown. These are the aliases the CLI
     /// documents for <c>--model</c>, which always resolve to the latest model
     /// in each family — so this list does not need touching when a new model
     /// ships.
@@ -122,7 +115,7 @@ public static class ClaudeModelCatalog
             : StandardContextWindowTokens;
 
     /// <summary>
-    /// Turns a reported model id into something short enough for the header
+    /// Turns a reported model id into something short enough for the status bar
     /// ("claude-opus-5[1m]" → "Opus 5"). Unrecognized ids come back unchanged
     /// so a new family still shows something truthful.
     /// </summary>

@@ -255,7 +255,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
         var vm = new ChatSessionViewModel(chatService, outputListener, optionsAccessor, permissionBroker, questionBroker, vmLogger);
 
-        // The header pickers only change this session; persisting the choice so
+        // The status bar pickers only change this session; persisting the choice so
         // the next one starts the same way is the host's side of the deal.
         if (optionsPage is not null)
         {

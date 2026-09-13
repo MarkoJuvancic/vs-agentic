@@ -8,8 +8,8 @@ using VsAgentic.Services.Abstractions;
 namespace VsAgentic.VSExtension.ToolWindows;
 
 /// <summary>
-/// One labelled gauge in the chat header: a caption, a reading, and a thin bar
-/// that changes colour as it fills.
+/// One reading in the chat status bar: either a bar with the reading inside it
+/// that changes colour as it fills, or a caption and the reading as plain text.
 /// </summary>
 public partial class UsageMeter : UserControl
 {
@@ -25,7 +25,7 @@ public partial class UsageMeter : UserControl
         DependencyProperty.Register(nameof(Caption), typeof(string), typeof(UsageMeter),
             new PropertyMetadata(""));
 
-    /// <summary>Short label above the bar, e.g. "Context".</summary>
+    /// <summary>Short label before the reading in the plain form, e.g. "5h".</summary>
     public string Caption
     {
         get => (string)GetValue(CaptionProperty);
@@ -71,7 +71,8 @@ public partial class UsageMeter : UserControl
 
     /// <summary>
     /// False for readings with no ceiling — session totals only ever grow, so
-    /// there is no fraction to draw.
+    /// there is no fraction to draw — and for the rolling windows, whose ceiling
+    /// is only an estimate.
     /// </summary>
     public bool ShowBar
     {

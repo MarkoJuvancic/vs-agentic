@@ -20,17 +20,17 @@ public class VsAgenticOptions
 
     /// <summary>
     /// Alias passed to the CLI's <c>--model</c>, or empty to leave the CLI's own
-    /// choice alone. Set from the model dropdown in the chat header; see
+    /// choice alone. Set from the model dropdown in the chat status bar; see
     /// <see cref="ClaudeModelCatalog"/> for the accepted values.
     /// </summary>
     public string Model { get; set; } = "";
 
     /// <summary>
-    /// Reasoning effort passed to the CLI's <c>--effort</c>, always sent so the
-    /// header can show a value that is actually in force. Set from the effort
-    /// dropdown in the chat header.
+    /// Reasoning effort passed to the CLI's <c>--effort</c>. <see cref="ClaudeEffort.Default"/>
+    /// sends no flag, so older CLIs still start. Set from the effort dropdown in
+    /// the chat status bar.
     /// </summary>
-    public ClaudeEffort Effort { get; set; } = ClaudeEffort.High;
+    public ClaudeEffort Effort { get; set; } = ClaudeEffort.Default;
 
     /// <summary>
     /// Subscription the rolling usage meters are sized against. Display only —

@@ -13,33 +13,35 @@
 
              The fill is deliberately translucent: the reading sits on top of
              the bar, and it has to stay legible across the boundary between the
-             filled and unfilled halves. -->
+             filled and unfilled halves.
+
+             The track is a faint wash of the grey text colour, not the combo
+             border colour: that one already draws the input container and the
+             rule above the status bar, and a third shape in it blurs together. -->
         <Style x:Key="MeterBarStyle" TargetType="ProgressBar">
             <Setter Property="Minimum" Value="0"/>
             <Setter Property="Maximum" Value="1"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Background"
-                    Value="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"/>
+                    Value="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
             <!-- Normal: the hyperlink colour the chat already uses as its accent,
-                 so the header agrees with the transcript below it. -->
+                 so the status bar agrees with the transcript above it. -->
             <Setter Property="Foreground"
                     Value="{DynamicResource {x:Static vs:VsBrushes.PanelHyperlinkKey}}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ProgressBar">
-                        <Border CornerRadius="3"
-                                Background="{TemplateBinding Background}"
-                                SnapsToDevicePixels="True"
-                                ClipToBounds="True">
-                            <Grid>
-                                <Rectangle x:Name="PART_Track"/>
-                                <Rectangle x:Name="PART_Indicator"
-                                           HorizontalAlignment="Left"
-                                           RadiusX="3" RadiusY="3"
-                                           Opacity="0.45"
-                                           Fill="{TemplateBinding Foreground}"/>
-                            </Grid>
-                        </Border>
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="PART_Track"
+                                    CornerRadius="3"
+                                    Opacity="0.2"
+                                    Background="{TemplateBinding Background}"/>
+                            <Border x:Name="PART_Indicator"
+                                    HorizontalAlignment="Left"
+                                    CornerRadius="3"
+                                    Opacity="0.45"
+                                    Background="{TemplateBinding Foreground}"/>
+                        </Grid>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -83,8 +85,9 @@
                        Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
         </Grid>
 
-        <!-- Plain form, for readings with no ceiling: a bar pinned at zero
-             forever reads as broken, not as unbounded. -->
+        <!-- Plain form, for readings with no ceiling (a bar pinned at zero
+             forever reads as broken, not as unbounded) or with only an
+             estimated one (a bar would overstate its precision). -->
         <StackPanel x:Name="TextForm"
                     Orientation="Horizontal"
                     VerticalAlignment="Center">

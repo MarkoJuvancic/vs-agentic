@@ -10,10 +10,10 @@ namespace VsAgentic.UI.Controls;
 /// <c>ConverterParameter</c> pixels wide.
 ///
 /// A chat tool window is routinely docked at 300px and just as routinely
-/// floated at 1200px, so the header cannot assume room for everything. Rather
-/// than let the gauges squeeze the title into an ellipsis, each one names the
-/// width it needs and drops out below it — widest-to-narrowest, so what
-/// survives at the smallest size is what matters most.
+/// floated at 1200px, so the status bar cannot assume room for everything.
+/// Rather than let the readings crowd each other, each one names the width it
+/// needs and drops out below it, so what survives at the smallest size is what
+/// matters most.
 /// </summary>
 public sealed class MinWidthVisibilityConverter : IValueConverter
 {

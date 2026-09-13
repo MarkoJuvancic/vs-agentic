@@ -341,6 +341,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             if (historyJson is not null && _chatService is not null)
             {
                 _chatService.RestoreHistory(historyJson);
+
+                // The CLI session id is only known now, so a model preview taken
+                // at construction may have answered for a new session.
+                RefreshModelPreview();
             }
         }
         catch
@@ -725,7 +729,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         try
         {
             if (_chatService is not null)
+            {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
+                _chatService.ModelChanged -= OnChatServiceModelChanged;
+            }
         }
         catch { }
         try { (_chatService as IDisposable)?.Dispose(); } catch { }

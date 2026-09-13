@@ -9,7 +9,7 @@ namespace VsAgentic.Services.ClaudeCli;
 
 /// <summary>
 /// Append-only record of "this many tokens went out at this time", used to fill
-/// the rolling 5-hour and weekly meters in the chat header.
+/// the rolling 5-hour and weekly readings in the chat status bar.
 ///
 /// It is deliberately machine-wide rather than per-session: the rate limit it
 /// approximates is charged against the account, so a meter that reset when a

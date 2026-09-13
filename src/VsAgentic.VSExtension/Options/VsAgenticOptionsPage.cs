@@ -27,19 +27,19 @@ public class VsAgenticOptionsPage : DialogPage
 
     [Category("Claude CLI")]
     [DisplayName("Model")]
-    [Description("Model alias passed to the CLI (opus, sonnet, haiku, fable), or empty to leave the CLI's own choice alone. Normally set from the dropdown in the chat header; this is where that choice is remembered between restarts.")]
+    [Description("Model alias passed to the CLI (opus, sonnet, haiku, fable), or empty to leave the CLI's own choice alone. Normally set from the dropdown under the chat input; this is where that choice is remembered between restarts.")]
     [DefaultValue("")]
     public string Model { get; set; } = "";
 
     [Category("Claude CLI")]
     [DisplayName("Reasoning effort")]
-    [Description("Effort level passed to the CLI on every session. Always sent, because the CLI does not report the effort it is running with — sending it is the only way the header can name a level that is genuinely in force. Note this overrides an effort configured elsewhere in your own CLI settings. Normally set from the dropdown in the chat header.")]
-    [DefaultValue(ClaudeEffort.High)]
-    public ClaudeEffort Effort { get; set; } = ClaudeEffort.High;
+    [Description("Effort level passed to the CLI. Default sends no --effort flag, so the CLI uses its own setting and an older CLI without that flag still starts. The CLI does not report the effort it runs with, so the dropdown then shows Default rather than a level. Choosing a level overrides an effort configured in your own CLI settings. Normally set from the dropdown under the chat input.")]
+    [DefaultValue(ClaudeEffort.Default)]
+    public ClaudeEffort Effort { get; set; } = ClaudeEffort.Default;
 
     [Category("Usage meters")]
     [DisplayName("Plan")]
-    [Description("Subscription the 5-hour and weekly meters in the chat header are sized against. Display only — nothing here is sent to the CLI. Choose Unlimited to hide those meters.")]
+    [Description("Subscription the 5-hour and weekly readings under the chat input are sized against. Display only — nothing here is sent to the CLI. Choose Unlimited to hide those readings.")]
     [DefaultValue(ClaudeUsagePlan.Pro)]
     public ClaudeUsagePlan UsagePlan { get; set; } = ClaudeUsagePlan.Pro;
 
