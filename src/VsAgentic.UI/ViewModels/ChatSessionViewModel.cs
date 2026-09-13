@@ -45,6 +45,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     /// </summary>
     public bool HasCustomTitle { get; set; }
 
+    /// <summary>
+    /// Title of a session whose first message is an image with no text, until
+    /// a message with text gives the title model something to summarize.
+    /// </summary>
+    private const string PastedImageTitle = "Pasted image";
+
     // Realtime activity indicator: a braille spinner prefix while the AI is
     // working, a steady "? " prefix while awaiting user input (permission /
     // question banner), and no prefix while idle. Host bindings (e.g. the VS
@@ -451,10 +457,22 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Generate a title from the first user message (fire-and-forget, non-blocking).
-        // Skipped when the user already named the session by hand.
-        var isFirstMessage = Items.Count(i => i.Type == ChatItemType.User) == 1;
-        if (isFirstMessage && !HasCustomTitle)
+        // Generate a title from the first user message that has text (fire-and-forget,
+        // non-blocking). Skipped when the user already named the session by hand.
+        // The title model only sees text: handed an image-only prompt it names the
+        // session after the empty message ("Empty message, no request given"), so
+        // such a session gets a placeholder until text arrives.
+        var userMessages = Items.Where(i => i.Type == ChatItemType.User).ToList();
+        var hasText = !string.IsNullOrWhiteSpace(message);
+        var isFirstMessage = userMessages.Count == 1;
+        var isFirstText = hasText && userMessages.Count(i => !string.IsNullOrWhiteSpace(i.Content)) == 1;
+
+        if (isFirstMessage && !hasText && !HasCustomTitle)
+        {
+            SessionTitle = PastedImageTitle;
+            PersistTitleUpdateFireAndForget(PastedImageTitle);
+        }
+        else if (isFirstText && !HasCustomTitle)
         {
             _ = Task.Run(async () =>
             {
