@@ -7,6 +7,39 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="/VsAgentic.VSExtension;component/ToolWindows/Banners/BannerStyles.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- A choice in the "more ways to allow" menu: full width, left
+                 aligned, no border, highlighted on hover like a menu item. -->
+            <Style x:Key="MenuChoiceButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"/>
+                <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="bd"
+                                    Background="{TemplateBinding Background}"
+                                    CornerRadius="3"
+                                    SnapsToDevicePixels="True">
+                                <ContentPresenter HorizontalAlignment="Left"
+                                                  VerticalAlignment="Center"
+                                                  Margin="10,6,10,6"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="bd" Property="Background"
+                                            Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}"/>
+                                </Trigger>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="bd" Property="Background"
+                                            Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseDownBackgroundGradientKey}}"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
         </ResourceDictionary>
     </UserControl.Resources>
 
@@ -41,17 +74,72 @@
                 <Button Content="Allow"
                         Style="{StaticResource PrimaryButtonStyle}"
                         Command="{Binding AllowCommand}"/>
-                <Button Content="Allow for this session"
-                        Style="{StaticResource SecondaryButtonStyle}"
-                        Command="{Binding AllowForSessionCommand}"
-                        ToolTip="{Binding AllowForSessionTooltip}"
-                        Visibility="{Binding CanAllowForSession, Converter={StaticResource BoolToVis}}"/>
+                <!-- Split button. The main half keeps the session allow a single
+                     click; the chevron opens the longer-lived and broader
+                     choices, which are rarer and more consequential. -->
+                <StackPanel x:Name="SessionSplit"
+                            Orientation="Horizontal"
+                            Visibility="{Binding CanAllowForSession, Converter={StaticResource BoolToVis}}">
+                    <Button x:Name="AllowForSessionButton"
+                            Content="Allow for this session"
+                            Style="{StaticResource SecondaryButtonStyle}"
+                            Command="{Binding AllowForSessionCommand}"
+                            ToolTip="{Binding AllowForSessionTooltip}"/>
+                    <Button Style="{StaticResource SecondaryButtonStyle}"
+                            Margin="-1,0,0,0"
+                            Padding="0"
+                            ToolTip="More ways to allow"
+                            Click="MoreAllowButton_Click">
+                        <TextBlock Text="&#xE70D;"
+                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                   FontSize="10"
+                                   Margin="-6,0"
+                                   VerticalAlignment="Center"/>
+                    </Button>
+                </StackPanel>
+
                 <Button Content="Deny"
                         Style="{StaticResource DangerButtonStyle}"
                         Command="{Binding DenyCommand}"/>
                 <Button Content="Other..."
                         Style="{StaticResource SecondaryButtonStyle}"
                         Command="{Binding OtherCommand}"/>
+
+                <Popup x:Name="MoreAllowPopup"
+                       PlacementTarget="{Binding ElementName=AllowForSessionButton}"
+                       Placement="Bottom"
+                       StaysOpen="False"
+                       AllowsTransparency="True"
+                       PopupAnimation="Fade">
+                    <Border Background="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBackgroundKey}}"
+                            BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="4"
+                            Margin="0,4,0,0">
+                        <!-- Each label names both axes, which commands and for how
+                             long. The tooltip spells out the rules granted. -->
+                        <StackPanel MinWidth="220">
+                            <Button Content="Always allow"
+                                    Style="{StaticResource MenuChoiceButtonStyle}"
+                                    ToolTip="{Binding AllowAlwaysTooltip}"
+                                    Click="MoreAllowChoice_Click"
+                                    Command="{Binding AllowAlwaysCommand}"/>
+                            <Button Content="Allow similar for this session"
+                                    Style="{StaticResource MenuChoiceButtonStyle}"
+                                    ToolTip="{Binding AllowSimilarForSessionTooltip}"
+                                    Visibility="{Binding CanAllowSimilar, Converter={StaticResource BoolToVis}}"
+                                    Click="MoreAllowChoice_Click"
+                                    Command="{Binding AllowSimilarForSessionCommand}"/>
+                            <Button Content="Always allow similar"
+                                    Style="{StaticResource MenuChoiceButtonStyle}"
+                                    ToolTip="{Binding AllowSimilarAlwaysTooltip}"
+                                    Visibility="{Binding CanAllowSimilar, Converter={StaticResource BoolToVis}}"
+                                    Click="MoreAllowChoice_Click"
+                                    Command="{Binding AllowSimilarAlwaysCommand}"/>
+                        </StackPanel>
+                    </Border>
+                </Popup>
             </StackPanel>
 
             <!-- Other... state: textbox for alternative instructions, Submit

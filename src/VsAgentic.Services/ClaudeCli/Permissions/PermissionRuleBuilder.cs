@@ -32,37 +32,61 @@ public static class PermissionRuleBuilder
     /// Rules covering calls of this shape. Empty when the request has nothing
     /// stable to key on, in which case only a one-off allow makes sense.
     /// </summary>
-    public static IReadOnlyList<PermissionRule> Build(string toolName, JsonElement input)
+    public static IReadOnlyList<PermissionRule> Build(string toolName, JsonElement input) =>
+        BuildRules(toolName, input, similar: false);
+
+    /// <summary>
+    /// Broader rules for the family this request belongs to. A shell command
+    /// loses its subcommand (<c>gh issue</c> becomes <c>gh</c>), and a file or
+    /// fetch loses its path or domain, so the tool is allowed as a whole.
+    /// </summary>
+    public static IReadOnlyList<PermissionRule> BuildSimilar(string toolName, JsonElement input) =>
+        BuildRules(toolName, input, similar: true);
+
+    /// <summary>
+    /// Whether <see cref="BuildSimilar"/> grants anything beyond <see cref="Build"/>.
+    /// It does not for <c>dotnet --version</c>, which already yields
+    /// <c>Bash(dotnet:*)</c>. Nothing broader is offered short of every shell
+    /// command, which no button should grant.
+    /// </summary>
+    public static bool HasDistinctSimilar(string toolName, JsonElement input)
+    {
+        var specific = Build(toolName, input);
+        var similar = BuildSimilar(toolName, input);
+        if (specific.Count == 0 || similar.Count == 0) return false;
+
+        return similar.Any(s => specific.All(p => p.Display != s.Display));
+    }
+
+    private static IReadOnlyList<PermissionRule> BuildRules(string toolName, JsonElement input, bool similar)
     {
         if (string.IsNullOrWhiteSpace(toolName)) return Array.Empty<PermissionRule>();
 
         if (IsShell(toolName))
-            return BuildShellRules(toolName, input);
+            return BuildShellRules(toolName, input, similar);
 
         if (IsFileEdit(toolName))
         {
             // The CLI matches every file-editing tool against Edit rules, so a
             // Write(...) rule would be stored and then never consulted.
             var path = FileRulePath(ReadString(input, "file_path") ?? ReadString(input, "notebook_path"));
-            return path is null
-                ? Array.Empty<PermissionRule>()
-                : new[] { new PermissionRule("Edit", path) };
+            if (path is null) return Array.Empty<PermissionRule>();
+            return new[] { new PermissionRule("Edit", similar ? null : path) };
         }
 
         if (toolName.Equals("Read", StringComparison.OrdinalIgnoreCase))
         {
             var path = FileRulePath(ReadString(input, "file_path"));
-            return path is null
-                ? Array.Empty<PermissionRule>()
-                : new[] { new PermissionRule("Read", path) };
+            if (path is null) return Array.Empty<PermissionRule>();
+            return new[] { new PermissionRule("Read", similar ? null : path) };
         }
 
         if (toolName.Equals("WebFetch", StringComparison.OrdinalIgnoreCase))
         {
             // Without a specifier this would allow fetching any URL.
-            return Uri.TryCreate(ReadString(input, "url"), UriKind.Absolute, out var uri) && uri.Host.Length > 0
-                ? new[] { new PermissionRule(toolName, "domain:" + uri.Host) }
-                : Array.Empty<PermissionRule>();
+            if (!Uri.TryCreate(ReadString(input, "url"), UriKind.Absolute, out var uri) || uri.Host.Length == 0)
+                return Array.Empty<PermissionRule>();
+            return new[] { new PermissionRule(toolName, similar ? null : "domain:" + uri.Host) };
         }
 
         // Tools without a meaningful argument to key on (MCP tools, WebSearch,
@@ -71,7 +95,7 @@ public static class PermissionRuleBuilder
         return new[] { new PermissionRule(toolName) };
     }
 
-    private static IReadOnlyList<PermissionRule> BuildShellRules(string toolName, JsonElement input)
+    private static IReadOnlyList<PermissionRule> BuildShellRules(string toolName, JsonElement input, bool similar)
     {
         // A shell line is usually several commands joined by && or |, and the
         // CLI only stops asking once every one of them is covered. Granting the
@@ -82,7 +106,7 @@ public static class PermissionRuleBuilder
 
         foreach (var segment in SplitSegments(ReadString(input, "command")))
         {
-            var prefix = CommandPrefix(segment);
+            var prefix = CommandPrefix(segment, similar ? 0 : MaxSubcommands);
             if (prefix is null) continue;
 
             var rule = new PermissionRule(toolName, prefix + ":*");
@@ -162,11 +186,12 @@ public static class PermissionRuleBuilder
     }
 
     /// <summary>
-    /// The executable plus at most <see cref="MaxSubcommands"/> subcommand:
-    /// "git log" from <c>git log --oneline -5</c>. Flags and operands are never
-    /// part of a rule, so <c>dotnet --version</c> yields "dotnet".
+    /// The executable plus at most <paramref name="subcommandWords"/> subcommands:
+    /// "git log" from <c>git log --oneline -5</c>, or "git" with none. Flags and
+    /// operands are never part of a rule, so <c>dotnet --version</c> yields
+    /// "dotnet" either way.
     /// </summary>
-    private static string? CommandPrefix(string segment)
+    private static string? CommandPrefix(string segment, int subcommandWords)
     {
         // An executable given by path is quoted when the path has spaces, so it
         // has to be taken whole: splitting on spaces first turned
@@ -183,7 +208,7 @@ public static class PermissionRuleBuilder
 
         var words = new List<string> { parts[0] };
 
-        for (var i = 1; i < parts.Length && words.Count <= MaxSubcommands; i++)
+        for (var i = 1; i < parts.Length && words.Count <= subcommandWords; i++)
         {
             var part = parts[i];
 

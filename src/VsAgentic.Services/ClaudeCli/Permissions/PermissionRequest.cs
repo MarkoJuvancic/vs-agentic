@@ -38,36 +38,57 @@ public sealed class PermissionDecision
     public string? Message { get; }
 
     /// <summary>
-    /// Rules the CLI should add for the rest of its session, so it stops asking
-    /// for calls they match. Empty for a one-off allow. They live in the CLI
-    /// process only, so they are gone once that process exits.
+    /// Rules the CLI should add so it stops asking for calls they match. Empty
+    /// for a one-off allow. <see cref="Scope"/> says how long they last.
     /// </summary>
-    public IReadOnlyList<PermissionRule> SessionRules { get; }
+    public IReadOnlyList<PermissionRule> Rules { get; }
+
+    public PermissionRuleScope Scope { get; }
 
     private PermissionDecision(
         PermissionBehavior behavior,
         string? updatedInputJson,
         string? message,
-        IReadOnlyList<PermissionRule>? sessionRules = null)
+        IReadOnlyList<PermissionRule>? rules = null,
+        PermissionRuleScope scope = PermissionRuleScope.Session)
     {
         Behavior = behavior;
         UpdatedInputJson = updatedInputJson;
         Message = message;
-        SessionRules = sessionRules ?? Array.Empty<PermissionRule>();
+        Rules = rules ?? Array.Empty<PermissionRule>();
+        Scope = scope;
     }
 
     public static PermissionDecision Allow(string updatedInputJson)
         => new PermissionDecision(PermissionBehavior.Allow, updatedInputJson, null);
 
     /// <summary>
-    /// Allow this call and stop asking for anything matching <paramref name="rules"/>
-    /// until the CLI process exits.
+    /// Allow this call and stop asking for anything matching <paramref name="rules"/>,
+    /// for as long as <paramref name="scope"/> says.
     /// </summary>
-    public static PermissionDecision AllowForSession(string updatedInputJson, IReadOnlyList<PermissionRule> rules)
-        => new PermissionDecision(PermissionBehavior.Allow, updatedInputJson, null, rules);
+    public static PermissionDecision AllowWithRules(
+        string updatedInputJson,
+        IReadOnlyList<PermissionRule> rules,
+        PermissionRuleScope scope)
+        => new PermissionDecision(PermissionBehavior.Allow, updatedInputJson, null, rules, scope);
 
     public static PermissionDecision Deny(string message)
         => new PermissionDecision(PermissionBehavior.Deny, null, message);
+}
+
+/// <summary>
+/// How long an accepted rule lasts. Maps to the CLI's <c>destination</c>.
+/// </summary>
+public enum PermissionRuleScope
+{
+    /// <summary>Kept in the CLI process only; gone when it exits.</summary>
+    Session,
+
+    /// <summary>
+    /// Written by the CLI to the user's own settings (<c>~/.claude/settings.json</c>),
+    /// so it applies in every project until the user removes it.
+    /// </summary>
+    User
 }
 
 /// <summary>
