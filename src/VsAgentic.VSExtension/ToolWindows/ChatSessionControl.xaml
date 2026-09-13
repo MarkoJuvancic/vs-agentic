@@ -442,16 +442,29 @@
 
                                         <!-- Changing either picker restarts the CLI
                                              process on the next message; the
-                                             conversation is resumed, not lost. -->
+                                             conversation is resumed, not lost.
+
+                                             An ItemTemplate, not DisplayMemberPath:
+                                             the Default row renames itself once the
+                                             model is known, and StatusComboStyle only
+                                             forwards SelectionBoxItemTemplate. With
+                                             DisplayMemberPath that is null, so the
+                                             closed box would draw ToString() once and
+                                             keep showing "Default". -->
                                         <ComboBox Style="{StaticResource StatusComboStyle}"
                                                   ItemContainerStyle="{StaticResource StatusComboItemStyle}"
                                                   ItemsSource="{Binding ModelOptions}"
                                                   SelectedItem="{Binding SelectedModel}"
-                                                  DisplayMemberPath="DisplayName"
                                                   ToolTip="{Binding ModelDisplay, StringFormat='Model: {0}&#x0a;Takes effect on the next message.'}"
                                                   Visibility="{Binding ActualWidth, ElementName=StatusInfo,
                                                                Converter={StaticResource MinWidth},
-                                                               ConverterParameter=405}"/>
+                                                               ConverterParameter=405}">
+                                            <ComboBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding DisplayName}"/>
+                                                </DataTemplate>
+                                            </ComboBox.ItemTemplate>
+                                        </ComboBox>
 
                                         <ComboBox Style="{StaticResource StatusComboStyle}"
                                                   ItemContainerStyle="{StaticResource StatusComboItemStyle}"
