@@ -624,7 +624,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 switch (action)
                 {
                     case FileLinkAction.Open when Directory.Exists(resolved):
-                        System.Diagnostics.Process.Start("explorer.exe", $"\"{resolved}\"");
+                        StartExplorer($"\"{resolved}\"");
                         break;
 
                     case FileLinkAction.Open:
@@ -637,7 +637,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                         break;
 
                     case FileLinkAction.ShowInExplorer:
-                        System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{resolved}\"");
+                        StartExplorer($"/select,\"{resolved}\"");
                         break;
                 }
             }
@@ -647,6 +647,16 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 SetStatusBarText($"VsAgentic: {action} failed for {resolved}");
             }
         });
+    }
+
+    /// <summary>
+    /// Opens Explorer and releases the handle. We never wait on it or read its
+    /// exit code, so holding the <see cref="System.Diagnostics.Process"/> only
+    /// keeps a native handle alive for the life of Visual Studio.
+    /// </summary>
+    private static void StartExplorer(string arguments)
+    {
+        using var process = System.Diagnostics.Process.Start("explorer.exe", arguments);
     }
 
     /// <summary>
