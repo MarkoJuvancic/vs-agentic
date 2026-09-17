@@ -611,8 +611,13 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 return;
             }
 
+            // TryParse, because the regex only checks that the suffix is digits.
+            // "foo.cs:99999999999" overflows, and the throw would land in the
+            // outer fire-and-forget task where nobody sees it. Line 0 means
+            // "open the file and leave the caret alone", which is the right
+            // outcome for a number no editor could scroll to anyway.
             if (lineMatch.Success)
-                line = int.Parse(lineMatch.Groups[1].Value);
+                int.TryParse(lineMatch.Groups[1].Value, out line);
 
             try
             {
