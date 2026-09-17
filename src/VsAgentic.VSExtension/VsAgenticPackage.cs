@@ -656,6 +656,12 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
     {
         try
         {
+            // The link text comes from model output, so a UNC path can name any
+            // host. The existence check below would connect to it over SMB, and
+            // Open or Show in Explorer would then open Explorer on the share.
+            // Device paths (\\?\, \\.\) are refused by the same test.
+            if (path.StartsWith(@"\\", StringComparison.Ordinal)) return null;
+
             if (Path.IsPathRooted(path))
                 return PathExists(path) ? Path.GetFullPath(path) : null;
 
