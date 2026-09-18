@@ -997,7 +997,12 @@ function addMessage(id, type, dataJson) {
         addToActivityGroup(div, type, data);
         maybeScrollToBottom();
     } else {
-        absorbPendingText();
+        // No absorbing here. Text is only commentary once a step follows it,
+        // and nothing that reaches this branch is a step. The service does not
+        // send two assistant items in a row, so in practice this is the
+        // "Processing stopped." or "Error:" message the view model adds when a
+        // turn is cancelled or throws — and the reply it interrupts has to stay
+        // where it can be read.
         _container.appendChild(div);
         _pendingText = div;
         maybeScrollToBottom();
