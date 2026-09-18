@@ -333,10 +333,23 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     foreach (var fileName in msg.ImageFileNames)
                     {
                         // A missing file just means one thumbnail short; the rest
-                        // of the conversation still restores.
-                        var stored = await store.GetImageAsync(folder, sessionId.Value, fileName);
-                        if (stored is not null)
-                            imageDataUris.Add(stored.ToDataUri());
+                        // of the conversation still restores. The same has to hold
+                        // for a file that is present but cannot be read — locked
+                        // by a virus scanner or OneDrive, denied, or a null entry
+                        // in the list. Without a catch here the outer one takes
+                        // over: no message is shown at all, and RestoreHistory is
+                        // skipped, so the next message starts a new CLI session
+                        // instead of continuing this one.
+                        try
+                        {
+                            var stored = await store.GetImageAsync(folder, sessionId.Value, fileName);
+                            if (stored is not null)
+                                imageDataUris.Add(stored.ToDataUri());
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "[VM] Could not restore an attached image ({FileName})", fileName);
+                        }
                     }
                 }
 
