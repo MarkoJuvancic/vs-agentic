@@ -662,6 +662,19 @@ function isActivityType(type) {
     return type === 'ToolStep' || type === 'Thinking';
 }
 
+// A turn that could not run at all. The service reports these as steps of its
+// own: the CLI failing to start, whose body carries the install instructions,
+// and a turn the CLI ended with an error. They are the one thing in a turn the
+// user has to see, so they stay out of the folded row.
+//
+// The tool name is part of the test on purpose. An ordinary tool call that
+// fails is a step like any other and belongs in the row; it is only reported as
+// Success today (#46), and matching the status alone would throw every failed
+// command out of the row the day that is fixed.
+function isTurnFailure(type, data) {
+    return type === 'ToolStep' && data.Status === 'Error' && data.ToolName === 'ClaudeCli';
+}
+
 function setActivityLabel(group, text) {
     var label = group.querySelector('.activity-label');
     if (label) label.textContent = text || '';
@@ -973,6 +986,12 @@ function addMessage(id, type, dataJson) {
         _userScrolledUp = false;
         scrollToBottom();
         updateScrollButton();
+    } else if (isTurnFailure(type, data)) {
+        // Left standing, and the text before it left alone: when a turn ends in
+        // an error, that text is usually as far as the answer got, and folding
+        // it away takes both the answer and the reason off the screen at once.
+        _container.appendChild(div);
+        maybeScrollToBottom();
     } else if (isActivityType(type)) {
         absorbPendingText();
         addToActivityGroup(div, type, data);
