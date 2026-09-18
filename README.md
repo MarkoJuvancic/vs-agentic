@@ -74,7 +74,7 @@ Responses are rendered with full Markdown support — syntax-highlighted code bl
 3. Or, open Visual Studio 2026, go to **Extensions → Manage Extensions**, search for **VsAgentic**, click **Download** and restart Visual Studio
 
 ### Option 2 — Manual VSIX install
-1. Download the latest `.vsix` file from the [Releases](../../releases) page
+1. Download the latest `.vsix` file from the [Releases](https://github.com/adospace/vs-agentic/releases) page
 2. Double-click the `.vsix` file to launch the VSIX Installer
 3. Follow the prompts and restart Visual Studio
 
