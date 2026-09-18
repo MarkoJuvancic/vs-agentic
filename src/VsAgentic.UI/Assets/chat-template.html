@@ -789,6 +789,11 @@ function addToActivityGroup(div, type, data) {
     group._count++;
     setActivityCount(group, group._count);
 
+    // Marked here rather than only in updateStatus, so a step that is already
+    // finished when it arrives still marks the row. That is every step in a
+    // restored session, which is why the dot never turned red on one.
+    if (data.Status === 'Error') group.classList.add('has-error');
+
     var tool = type === 'Thinking' ? 'Thinking' : (data.ToolName || 'tool');
     var seen = group._tools.indexOf(tool);
     if (seen >= 0) group._tools.splice(seen, 1);
