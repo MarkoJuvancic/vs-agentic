@@ -164,7 +164,6 @@ VsAgentic.sln
 ├── VsAgentic.VSExtension/   # VSIX entry point — commands, tool windows, package bootstrap
 ├── VsAgentic.UI/            # Shared WPF controls, ViewModels, Markdown renderer (WebView2)
 ├── VsAgentic.Services/      # Core service layer — CLI integration, session store
-├── VsAgentic.Desktop/       # Standalone WPF desktop app (for development & testing)
 └── VsAgentic.Console/       # Console host (for development & testing)
 ```
 
