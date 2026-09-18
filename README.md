@@ -188,8 +188,8 @@ VsAgentic.sln
 
 Your feedback makes VsAgentic better! Here's how to get involved:
 
-- 🐛 **Found a bug?** [Open an issue](../../issues/new?template=bug_report.md)
-- 💡 **Have a feature idea?** [Start a discussion](../../discussions/new?category=ideas)
+- 🐛 **Found a bug?** [Open an issue](https://github.com/adospace/vs-agentic/issues/new)
+- 💡 **Have a feature idea?** [Open an issue](https://github.com/adospace/vs-agentic/issues/new) and describe it
 - ⭐ **Enjoying the extension?** A star on GitHub goes a long way — thank you!
 - 🗳️ **Marketplace review** — Leaving a review on the Visual Studio Marketplace helps other developers discover VsAgentic.
 
