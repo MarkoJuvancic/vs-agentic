@@ -368,7 +368,8 @@ html, body {
     /* Room for the button so it never sits on top of the first code line. */
     padding-right: 36px;
 }
-.code-copy-btn {
+.code-copy-btn,
+.quote-copy-btn {
     position: absolute;
     top: 6px;
     right: 6px;
@@ -389,11 +390,13 @@ html, body {
     line-height: 1;
 }
 .code-block:hover .code-copy-btn { opacity: 1; }
-.code-copy-btn:hover {
+.code-copy-btn:hover,
+.quote-copy-btn:hover {
     color: var(--text-primary);
     background: var(--bg-input);
 }
-.code-copy-btn.copied {
+.code-copy-btn.copied,
+.quote-copy-btn.copied {
     color: var(--success);
     opacity: 1;
 }
@@ -403,6 +406,16 @@ html, body {
     padding: 0.2em 0 0.2em 12px;
     color: #9e9e9e;
 }
+/* Copy button on block quotes. A quote is how a prompt to run is written, and
+   the message-level button would take the whole answer around it. */
+.quote-block {
+    position: relative;
+}
+.quote-block > blockquote {
+    /* Room for the button so it never sits on top of the quoted text. */
+    padding-right: 36px;
+}
+.quote-block:hover .quote-copy-btn { opacity: 1; }
 .md-content ul, .md-content ol { margin: 0.4em 0; padding-left: 1.6em; }
 .md-content li { margin: 0.15em 0; }
 .md-content table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
@@ -593,7 +606,7 @@ function addMessage(id, type, dataJson) {
         content.className = 'md-content msg-content';
         content.innerHTML = renderUserMd(data.Content || '');
         linkifyFilePaths(content);
-        addCodeCopyButtons(content);
+        addBlockCopyButtons(content);
         div.appendChild(label);
         div.appendChild(content);
     }
@@ -609,7 +622,7 @@ function addMessage(id, type, dataJson) {
         if (data.IsStreaming) content.classList.add('streaming-cursor');
         content.innerHTML = renderMd(data.Content || '');
         linkifyFilePaths(content);
-        addCodeCopyButtons(content);
+        addBlockCopyButtons(content);
         inner.appendChild(bullet);
         inner.appendChild(content);
         div.appendChild(inner);
@@ -756,7 +769,7 @@ function updateContent(id, contentMarkdown) {
             if (mc) {
                 mc.innerHTML = type === 'User' ? renderUserMd(contentMarkdown) : renderMd(contentMarkdown);
                 linkifyFilePaths(mc);
-                addCodeCopyButtons(mc);
+                addBlockCopyButtons(mc);
             }
         } else if (type === 'ToolStep' || type === 'Thinking') {
             var sc = el.querySelector('.msg-streaming-content');
@@ -793,7 +806,7 @@ function setBody(id, bodyContent, bodyMode) {
         body.innerHTML = renderMd(bodyContent);
     }
     linkifyFilePaths(body);
-    addCodeCopyButtons(body);
+    addBlockCopyButtons(body);
     body.style.display = '';
 
     // Apply cap and show-more link
@@ -964,45 +977,67 @@ function flashCopied(btn) {
     }, 1500);
 }
 
-// Give every fenced code block its own copy button, so a prompt or snippet
-// can be taken without selecting it by hand.
-function addCodeCopyButtons(container) {
+// Wrap a block in a positioned container and pin a copy button to its corner.
+// The wrapper is what keeps the button in place when the block scrolls.
+function wrapWithCopyButton(el, wrapClass, btnClass, title, getText) {
+    var wrap = document.createElement('div');
+    wrap.className = wrapClass;
+    el.parentNode.insertBefore(wrap, el);
+    wrap.appendChild(el);
+
+    var btn = document.createElement('button');
+    btn.className = btnClass;
+    btn.title = title;
+    btn.innerHTML = ICON_COPY;
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var text = getText(el);
+        if (!text) return;
+        copyToClipboard(text.replace(/\n$/, ''));
+        flashCopied(btn);
+    });
+    wrap.appendChild(btn);
+
+    // A block at the very top of a message would sit under the message-level
+    // copy button; yield to the block's own button while hovering.
+    wrap.addEventListener('mouseenter', function() {
+        var msg = this.closest('.msg');
+        if (msg) msg.classList.add('code-hover');
+    });
+    wrap.addEventListener('mouseleave', function() {
+        var msg = this.closest('.msg');
+        // Leaving a quote nested in another one is not leaving the outer
+        // block, so only give the message-level button back when no block in
+        // this message is under the pointer any more.
+        if (msg && !msg.querySelector('.code-block:hover, .quote-block:hover')) {
+            msg.classList.remove('code-hover');
+        }
+    });
+}
+
+// Give every fenced code block and every block quote its own copy button, so a
+// prompt or snippet can be taken without selecting it by hand.
+function addBlockCopyButtons(container) {
     var pres = container.querySelectorAll('pre');
     for (var i = 0; i < pres.length; i++) {
         var pre = pres[i];
         if (pre.parentNode && pre.parentNode.classList.contains('code-block')) continue;
 
-        var wrap = document.createElement('div');
-        wrap.className = 'code-block';
-        pre.parentNode.insertBefore(wrap, pre);
-        wrap.appendChild(pre);
-
-        var btn = document.createElement('button');
-        btn.className = 'code-copy-btn';
-        btn.title = 'Copy code to clipboard';
-        btn.innerHTML = ICON_COPY;
-        // Bind per-iteration so the handler copies its own block.
-        btn.addEventListener('click', (function(target, button) {
-            return function(e) {
-                e.stopPropagation();
-                var code = target.querySelector('code');
-                var text = (code || target).innerText;
-                if (!text) return;
-                copyToClipboard(text.replace(/\n$/, ''));
-                flashCopied(button);
-            };
-        })(pre, btn));
-        wrap.appendChild(btn);
-
-        // A code block at the very top of a message would sit under the
-        // message-level copy button; yield to the code button while hovering.
-        wrap.addEventListener('mouseenter', function() {
-            var msg = this.closest('.msg');
-            if (msg) msg.classList.add('code-hover');
+        wrapWithCopyButton(pre, 'code-block', 'code-copy-btn', 'Copy code to clipboard', function(target) {
+            var code = target.querySelector('code');
+            return (code || target).innerText;
         });
-        wrap.addEventListener('mouseleave', function() {
-            var msg = this.closest('.msg');
-            if (msg) msg.classList.remove('code-hover');
+    }
+
+    var quotes = container.querySelectorAll('blockquote');
+    for (var j = 0; j < quotes.length; j++) {
+        var quote = quotes[j];
+        if (quote.parentNode && quote.parentNode.classList.contains('quote-block')) continue;
+
+        // A quote inside another gets its own button as well: the inner quote
+        // is usually the line you want, and the outer one still copies both.
+        wrapWithCopyButton(quote, 'quote-block', 'quote-copy-btn', 'Copy quote to clipboard', function(target) {
+            return target.innerText;
         });
     }
 }
