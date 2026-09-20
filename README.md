@@ -74,7 +74,7 @@ Responses are rendered with full Markdown support — syntax-highlighted code bl
 3. Or, open Visual Studio 2026, go to **Extensions → Manage Extensions**, search for **VsAgentic**, click **Download** and restart Visual Studio
 
 ### Option 2 — Manual VSIX install
-1. Download the latest `.vsix` file from the [Releases](../../releases) page
+1. Download the latest `.vsix` file from the [Releases](https://github.com/adospace/vs-agentic/releases) page
 2. Double-click the `.vsix` file to launch the VSIX Installer
 3. Follow the prompts and restart Visual Studio
 
@@ -164,7 +164,6 @@ VsAgentic.sln
 ├── VsAgentic.VSExtension/   # VSIX entry point — commands, tool windows, package bootstrap
 ├── VsAgentic.UI/            # Shared WPF controls, ViewModels, Markdown renderer (WebView2)
 ├── VsAgentic.Services/      # Core service layer — CLI integration, session store
-├── VsAgentic.Desktop/       # Standalone WPF desktop app (for development & testing)
 └── VsAgentic.Console/       # Console host (for development & testing)
 ```
 
@@ -189,8 +188,8 @@ VsAgentic.sln
 
 Your feedback makes VsAgentic better! Here's how to get involved:
 
-- 🐛 **Found a bug?** [Open an issue](../../issues/new?template=bug_report.md)
-- 💡 **Have a feature idea?** [Start a discussion](../../discussions/new?category=ideas)
+- 🐛 **Found a bug?** [Open an issue](https://github.com/adospace/vs-agentic/issues/new)
+- 💡 **Have a feature idea?** [Open an issue](https://github.com/adospace/vs-agentic/issues/new) and describe it
 - ⭐ **Enjoying the extension?** A star on GitHub goes a long way — thank you!
 - 🗳️ **Marketplace review** — Leaving a review on the Visual Studio Marketplace helps other developers discover VsAgentic.
 
