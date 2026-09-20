@@ -12,6 +12,11 @@
              PreviewKeyDown="OnPreviewKeyDown" >
 
     <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/VsAgentic.VSExtension;component/ToolWindows/SharedStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <controls:MinWidthVisibilityConverter x:Key="MinWidth"/>
 
@@ -242,6 +247,7 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        </ResourceDictionary>
     </UserControl.Resources>
 
     <DockPanel x:Name="RootPanel"
