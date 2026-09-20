@@ -19,6 +19,8 @@ public sealed class UserQuestionBroker : IUserQuestionBroker
 
     public event Action<UserQuestionRequest>? QuestionRequested;
 
+    public event Action<string>? PendingCancelled;
+
     public Task<IReadOnlyDictionary<string, string>> SubmitAsync(
         UserQuestionRequest request,
         CancellationToken cancellationToken)
@@ -35,7 +37,10 @@ public sealed class UserQuestionBroker : IUserQuestionBroker
         var registration = cancellationToken.Register(() =>
         {
             if (_pending.TryRemove(request.ToolUseId, out var pending))
+            {
                 pending.TrySetResult(new Dictionary<string, string>());
+                RaisePendingCancelled(request.ToolUseId);
+            }
         });
         tcs.Task.ContinueWith(_ => registration.Dispose(), TaskScheduler.Default);
 
@@ -72,7 +77,23 @@ public sealed class UserQuestionBroker : IUserQuestionBroker
             {
                 _logger.LogInformation("[UserQuestionBroker] CancelAllPending resolving {Id} with empty answers", key);
                 tcs.TrySetResult(empty);
+                RaisePendingCancelled(key);
             }
+        }
+    }
+
+    // Raised after the TCS is settled, and never allowed to throw: a handler
+    // that fails must not stop the remaining questions from being resolved, or
+    // the dispatcher loop stays blocked on them.
+    private void RaisePendingCancelled(string id)
+    {
+        try
+        {
+            PendingCancelled?.Invoke(id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[UserQuestionBroker] PendingCancelled handler threw for {Id}", id);
         }
     }
 }

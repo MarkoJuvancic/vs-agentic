@@ -16,6 +16,10 @@ public partial class QuestionCardViewModel : ObservableObject, IBannerViewModel
     private readonly UserQuestionRequest _request;
     private readonly Action<IReadOnlyDictionary<string, string>> _onSubmitted;
 
+    /// <summary>Broker id of the question this card stands for. Lets the chat
+    /// match a cancellation back to the card on screen.</summary>
+    public string ToolUseId => _request.ToolUseId;
+
     public IReadOnlyList<QuestionViewModel> Questions { get; }
 
     [ObservableProperty]

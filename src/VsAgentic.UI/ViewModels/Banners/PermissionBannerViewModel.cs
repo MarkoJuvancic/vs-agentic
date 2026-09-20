@@ -11,6 +11,10 @@ public partial class PermissionBannerViewModel : ObservableObject, IBannerViewMo
     private readonly PermissionRequest _request;
     private readonly Action<PermissionDecision> _onResolved;
 
+    /// <summary>Broker id of the request this banner stands for. Lets the chat
+    /// match a cancellation back to the banner on screen.</summary>
+    public string RequestId => _request.Id;
+
     public string ToolName => _request.ToolName;
     public string Header => $"Claude wants to use {_request.ToolName}";
     public string BodyText { get; }

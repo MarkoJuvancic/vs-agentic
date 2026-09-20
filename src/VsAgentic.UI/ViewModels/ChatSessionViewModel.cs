@@ -176,9 +176,15 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         _questionBroker = questionBroker;
 
         if (_permissionBroker is not null)
+        {
             _permissionBroker.PermissionRequested += OnPermissionBrokerRequested;
+            _permissionBroker.PendingCancelled += OnPermissionCancelled;
+        }
         if (_questionBroker is not null)
+        {
             _questionBroker.QuestionRequested += OnQuestionBrokerRequested;
+            _questionBroker.PendingCancelled += OnQuestionCancelled;
+        }
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
 
@@ -263,6 +269,60 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 catch (Exception ex2) { _logger.LogError(ex2, "[VM] QuestionBroker.Resolve also failed"); }
             }
         });
+    }
+
+    /// <summary>
+    /// Stop answers every prompt in flight on the user's behalf, so the banner's
+    /// own callback never runs and the banner would otherwise stay on screen
+    /// long after its answer was sent. Take it down here, and say in the chat
+    /// why it went away.
+    /// </summary>
+    private void OnPermissionCancelled(string requestId)
+    {
+        Dispatch(() =>
+        {
+            if (ActiveBanner is not PermissionBannerViewModel banner || banner.RequestId != requestId)
+                return;
+
+            _logger.LogInformation("[VM] Permission prompt cancelled (id={Id})", requestId);
+            DismissActiveBanner($"_Stopped. The request to use **{banner.ToolName}** was denied._");
+        });
+    }
+
+    private void OnQuestionCancelled(string toolUseId)
+    {
+        Dispatch(() =>
+        {
+            if (ActiveBanner is not QuestionCardViewModel card || card.ToolUseId != toolUseId)
+                return;
+
+            _logger.LogInformation("[VM] User question cancelled (toolUseId={Id})", toolUseId);
+            DismissActiveBanner("_Stopped. The question was dismissed._");
+        });
+    }
+
+    /// <summary>Clears the banner and leaves a row in the chat saying so. Must
+    /// run on the UI thread.</summary>
+    private void DismissActiveBanner(string notice)
+    {
+        ActiveBanner = null;
+        if (_pendingUserPrompts > 0) _pendingUserPrompts--;
+        UpdateActivityIndicator();
+
+        var noticeId = $"dismissed-{++_userMsgCounter}";
+        Items.Add(new ChatItemViewModel
+        {
+            Type = ChatItemType.Assistant,
+            Content = notice,
+            IsStreaming = false
+        });
+        MessageAdded?.Invoke(noticeId, ChatItemType.Assistant, new ChatMessageData
+        {
+            Id = noticeId,
+            Type = "Assistant",
+            Content = notice
+        });
+        RequestScroll();
     }
 
     /// <summary>
@@ -505,6 +565,9 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // those TCSs (they're created with CancellationToken.None), so without
         // explicitly resolving them here a stuck banner leaves the chat hung
         // even after the user clicks Stop.
+        //
+        // Both calls raise PendingCancelled, which is what takes the banner off
+        // the screen — see OnPermissionCancelled / OnQuestionCancelled.
         try { _questionBroker?.CancelAllPending(); }
         catch (Exception ex) { _logger.LogError(ex, "[VM] Stop: questionBroker.CancelAllPending failed"); }
         try { _permissionBroker?.CancelAllPending(); }

@@ -17,6 +17,14 @@ public interface IUserQuestionBroker
 {
     event Action<UserQuestionRequest>? QuestionRequested;
 
+    /// <summary>
+    /// Raised with the tool_use id when a pending question is settled without
+    /// the user's answer: Stop, or teardown of the CLI process. The card's own
+    /// callback never runs in that case, so the UI needs this to take the card
+    /// down instead of leaving a dead question on screen.
+    /// </summary>
+    event Action<string>? PendingCancelled;
+
     Task<IReadOnlyDictionary<string, string>> SubmitAsync(
         UserQuestionRequest request,
         CancellationToken cancellationToken);
