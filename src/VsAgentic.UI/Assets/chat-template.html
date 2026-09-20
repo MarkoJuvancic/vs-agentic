@@ -525,6 +525,19 @@ function renderUserMd(text) {
     return userConverter.makeHtml(text);
 }
 
+// Keep the markdown a block was rendered from, so the copy button can hand
+// back the source instead of the rendered text. Reading the DOM loses the
+// syntax: a table arrives as bare cells with no pipes, and fenced code
+// arrives with no fences.
+function keepMarkdownSource(el, markdown) {
+    if (markdown) el.dataset.md = markdown;
+    else delete el.dataset.md;
+}
+
+function markdownSourceOf(el) {
+    return el.dataset.md !== undefined ? el.dataset.md : el.innerText;
+}
+
 function isNearBottom() {
     if (!_container) return true;
     return _container.scrollHeight - _container.scrollTop - _container.clientHeight < 50;
@@ -592,6 +605,7 @@ function addMessage(id, type, dataJson) {
         var content = document.createElement('div');
         content.className = 'md-content msg-content';
         content.innerHTML = renderUserMd(data.Content || '');
+        keepMarkdownSource(content, data.Content || '');
         linkifyFilePaths(content);
         addCodeCopyButtons(content);
         div.appendChild(label);
@@ -608,6 +622,7 @@ function addMessage(id, type, dataJson) {
         content.className = 'md-content msg-content';
         if (data.IsStreaming) content.classList.add('streaming-cursor');
         content.innerHTML = renderMd(data.Content || '');
+        keepMarkdownSource(content, data.Content || '');
         linkifyFilePaths(content);
         addCodeCopyButtons(content);
         inner.appendChild(bullet);
@@ -755,6 +770,7 @@ function updateContent(id, contentMarkdown) {
             var mc = el.querySelector('.msg-content');
             if (mc) {
                 mc.innerHTML = type === 'User' ? renderUserMd(contentMarkdown) : renderMd(contentMarkdown);
+                keepMarkdownSource(mc, contentMarkdown);
                 linkifyFilePaths(mc);
                 addCodeCopyButtons(mc);
             }
@@ -789,8 +805,11 @@ function setBody(id, bodyContent, bodyMode) {
 
     if (bodyMode === 'Html') {
         body.innerHTML = bodyContent;
+        // The host built this HTML itself, so there is no markdown to keep.
+        keepMarkdownSource(body, '');
     } else {
         body.innerHTML = renderMd(bodyContent);
+        keepMarkdownSource(body, bodyContent);
     }
     linkifyFilePaths(body);
     addCodeCopyButtons(body);
@@ -926,14 +945,14 @@ function getMessageText(msgEl) {
     var type = msgEl.dataset.type;
     if (type === 'User' || type === 'Assistant') {
         var mc = msgEl.querySelector('.msg-content');
-        return mc ? mc.innerText : '';
+        return mc ? markdownSourceOf(mc) : '';
     } else if (type === 'ToolStep') {
         var name = msgEl.querySelector('.toolstep-name');
         var body = msgEl.querySelector('.msg-body');
         var streaming = msgEl.querySelector('.msg-streaming-content');
         var parts = [];
         if (name) parts.push(name.textContent);
-        if (body && body.style.display !== 'none') parts.push(body.innerText);
+        if (body && body.style.display !== 'none') parts.push(markdownSourceOf(body));
         else if (streaming) parts.push(streaming.textContent);
         return parts.join('\n');
     } else if (type === 'Thinking') {
