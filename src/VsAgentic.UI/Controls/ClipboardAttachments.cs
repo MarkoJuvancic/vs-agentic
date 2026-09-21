@@ -18,6 +18,16 @@ public static class ClipboardAttachments
     private const int MaxEdge = 1568;
 
     /// <summary>
+    /// How many images one paste sends inline. Every one of them is decoded at
+    /// full size before it is shrunk, and that happens on the UI thread, so a
+    /// folder of photos copied in File Explorer would otherwise lock up Visual
+    /// Studio and then put the whole set into one request as base64. Images past
+    /// this many are attached as paths instead: nothing is decoded, nothing is
+    /// dropped, and the CLI reads them off disk if it needs them.
+    /// </summary>
+    private const int MaxInlineImages = 5;
+
+    /// <summary>
     /// Reads everything on the clipboard that can travel with a message, in the
     /// order it was copied. Images come back decoded, so they can go inline;
     /// everything else comes back as a path for the CLI to open itself. Empty
@@ -36,10 +46,13 @@ public static class ClipboardAttachments
             if (Clipboard.ContainsFileDropList())
             {
                 var attachments = new List<IChatAttachment>();
+                var inlined = 0;
                 foreach (var path in Clipboard.GetFileDropList())
                 {
-                    var attachment = TryReadPath(path);
-                    if (attachment is not null) attachments.Add(attachment);
+                    var attachment = TryReadPath(path, inlined < MaxInlineImages);
+                    if (attachment is null) continue;
+                    if (attachment is ChatImageAttachment) inlined++;
+                    attachments.Add(attachment);
                 }
                 if (attachments.Count > 0) return attachments;
             }
@@ -66,11 +79,17 @@ public static class ClipboardAttachments
         return Array.Empty<IChatAttachment>();
     }
 
-    private static IChatAttachment? TryReadPath(string? path)
+    /// <param name="mayInline">
+    /// False once the paste has inlined as many images as it is allowed to. An
+    /// image file is then attached as a path without being decoded, which is
+    /// what keeps a large selection off the UI thread.
+    /// </param>
+    private static IChatAttachment? TryReadPath(string? path, bool mayInline)
     {
         if (string.IsNullOrEmpty(path)) return null;
         if (Directory.Exists(path)) return new ChatFileAttachment(path!);
         if (!File.Exists(path)) return null;
+        if (!mayInline) return new ChatFileAttachment(path!);
 
         try
         {
