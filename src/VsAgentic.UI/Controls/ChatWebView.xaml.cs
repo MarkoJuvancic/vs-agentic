@@ -19,15 +19,16 @@ namespace VsAgentic.UI.Controls;
 public partial class ChatWebView : UserControl
 {
     /// <summary>
-    /// Raised when the user clicks a file path link in rendered content.
-    /// The string argument is the raw path (possibly with :line suffix).
+    /// Raised when the user clicks a file path link in rendered content, or
+    /// picks an item from its right-click menu. The string argument is the raw
+    /// path (possibly with :line suffix).
     /// </summary>
-    public static event Action<string>? FileOpenRequested;
+    public static event Action<string, FileLinkAction>? FileLinkRequested;
 
     /// <summary>
     /// Set by the host once its DI container is up. The control is created by
     /// XAML, so there is nothing to inject into — static, like
-    /// <see cref="FileOpenRequested"/>. Defaults to a no-op logger.
+    /// <see cref="FileLinkRequested"/>. Defaults to a no-op logger.
     /// </summary>
     public static ILogger Logger { get; set; } = NullLogger.Instance;
 
@@ -444,11 +445,18 @@ public partial class ChatWebView : UserControl
             var root = doc.RootElement;
             var type = root.GetProperty("type").GetString();
 
-            if (type == "openFile")
+            if (type == "fileLink")
             {
                 var path = root.GetProperty("path").GetString();
-                if (!string.IsNullOrEmpty(path))
-                    FileOpenRequested?.Invoke(path!);
+                var action = root.GetProperty("action").GetString() switch
+                {
+                    "open" => FileLinkAction.Open,
+                    "copyPath" => FileLinkAction.CopyPath,
+                    "showInExplorer" => FileLinkAction.ShowInExplorer,
+                    _ => (FileLinkAction?)null,
+                };
+                if (!string.IsNullOrEmpty(path) && action.HasValue)
+                    FileLinkRequested?.Invoke(path!, action.Value);
             }
             else if (type == "zoom")
             {
@@ -465,9 +473,12 @@ public partial class ChatWebView : UserControl
 
     public Task AddMessageAsync(string id, ChatItemType type, ChatMessageData data)
     {
-        var dataJson = JsonSerializer.Serialize(MaterializeImages(data));
-        return ExecuteOrQueueAsync(
-            $"addMessage({JsonSerializer.Serialize(id)}, {JsonSerializer.Serialize(type.ToString())}, {dataJson})");
+        // The script is built when it runs, not when it is queued: the image
+        // host folder only exists after EnsureCoreWebView2Async, and a message
+        // that arrives before then would otherwise be materialized against a
+        // null folder and carry its images inline. See ExecuteOrQueueAsync.
+        return ExecuteOrQueueAsync(() =>
+            $"addMessage({JsonSerializer.Serialize(id)}, {JsonSerializer.Serialize(type.ToString())}, {JsonSerializer.Serialize(MaterializeImages(data))})");
     }
 
     public Task UpdateContentAsync(string id, string content)
@@ -501,8 +512,12 @@ public partial class ChatWebView : UserControl
 
     public Task LoadMessagesAsync(IEnumerable<ChatMessageData> messages)
     {
-        var json = JsonSerializer.Serialize(messages.Select(MaterializeImages));
-        return ExecuteOrQueueAsync($"loadMessages({json})");
+        // Restoring a session normally wins the race against WebView2 startup,
+        // so this is the call that would have gone out inline. The list is taken
+        // now, the images are written when the script runs.
+        var snapshot = messages.ToList();
+        return ExecuteOrQueueAsync(() =>
+            $"loadMessages({JsonSerializer.Serialize(snapshot.Select(MaterializeImages))})");
     }
 
     public Task SetThemeColorsAsync(Dictionary<string, string> colors)
@@ -511,18 +526,28 @@ public partial class ChatWebView : UserControl
         return ExecuteOrQueueAsync($"setThemeColors({json})");
     }
 
-    private Task ExecuteOrQueueAsync(string script)
+    private Task ExecuteOrQueueAsync(string script) => ExecuteOrQueueAsync(() => script);
+
+    /// <summary>
+    /// Runs the script now, or builds and runs it once the page is up. The
+    /// factory is called at that later point, so anything the script needs from
+    /// the initialized WebView — the image host folder above all — is in place
+    /// by the time it is read.
+    /// </summary>
+    private Task ExecuteOrQueueAsync(Func<string> script)
     {
         if (_isWebViewReady)
         {
-            return ExecuteScriptSafeAsync(script);
+            return ExecuteScriptSafeAsync(script());
         }
 
         var tcs = new TaskCompletionSource<bool>();
         _pendingOps.Enqueue(async () =>
         {
-            await ExecuteScriptSafeAsync(script);
-            tcs.SetResult(true);
+            // The caller awaits this task, and building the script can now throw
+            // where before it could not, so completion is in a finally.
+            try { await ExecuteScriptSafeAsync(script()); }
+            finally { tcs.TrySetResult(true); }
         });
         return tcs.Task;
     }

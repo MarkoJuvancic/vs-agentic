@@ -187,6 +187,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _questionBroker.QuestionRequested += OnQuestionBrokerRequested;
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+
+        InitializeUsage(chatService, options.Value);
     }
 
     private void OnChatServiceLoginRequired(string? errorMessage)
@@ -331,10 +333,23 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     foreach (var fileName in msg.ImageFileNames)
                     {
                         // A missing file just means one thumbnail short; the rest
-                        // of the conversation still restores.
-                        var stored = await store.GetImageAsync(folder, sessionId.Value, fileName);
-                        if (stored is not null)
-                            imageDataUris.Add(stored.ToDataUri());
+                        // of the conversation still restores. The same has to hold
+                        // for a file that is present but cannot be read — locked
+                        // by a virus scanner or OneDrive, denied, or a null entry
+                        // in the list. Without a catch here the outer one takes
+                        // over: no message is shown at all, and RestoreHistory is
+                        // skipped, so the next message starts a new CLI session
+                        // instead of continuing this one.
+                        try
+                        {
+                            var stored = await store.GetImageAsync(folder, sessionId.Value, fileName);
+                            if (stored is not null)
+                                imageDataUris.Add(stored.ToDataUri());
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "[VM] Could not restore an attached image ({FileName})", fileName);
+                        }
                     }
                 }
 
@@ -360,6 +375,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             if (historyJson is not null && _chatService is not null)
             {
                 _chatService.RestoreHistory(historyJson);
+
+                // The CLI session id is only known now, so a model preview taken
+                // at construction may have answered for a new session.
+                RefreshModelPreview();
             }
         }
         catch
@@ -856,6 +875,15 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         try { _activityTimer?.Stop(); } catch { }
+        try
+        {
+            if (_chatService is not null)
+            {
+                _chatService.UsageChanged -= OnChatServiceUsageChanged;
+                _chatService.ModelChanged -= OnChatServiceModelChanged;
+            }
+        }
+        catch { }
         try { (_chatService as IDisposable)?.Dispose(); } catch { }
         try { _serviceScope?.Dispose(); } catch { }
     }
