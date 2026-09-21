@@ -33,7 +33,8 @@ public partial class ChatWebView : UserControl
 
     /// <summary>
     /// How long a user data folder survives once its owner can no longer be
-    /// confirmed. See <see cref="IsTooOld"/>.
+    /// confirmed. See <see cref="IsTooOld"/> and
+    /// <see cref="PurgeLegacySharedFolder"/>.
     /// </summary>
     private const int StaleFolderMaxAgeDays = 7;
 
@@ -137,7 +138,58 @@ public partial class ChatWebView : UserControl
         using var process = Process.GetCurrentProcess();
         var processFolder = $"{baseFolder}.p{process.Id}.t{process.StartTime.ToFileTimeUtc():x16}";
         PurgeStaleProcessFolders(baseFolder);
+        PurgeLegacySharedFolder(baseFolder);
         return await CoreWebView2Environment.CreateAsync(null, processFolder);
+    }
+
+    /// <summary>
+    /// Deletes the single shared user data folder every host used before the
+    /// move to process-scoped ones. It carries no owner in its name, so
+    /// <see cref="PurgeStaleProcessFolders"/> cannot see it and it would
+    /// otherwise stay on disk for good — a full browser profile, tens of
+    /// megabytes, on the machine of everyone who upgrades.
+    /// </summary>
+    private static void PurgeLegacySharedFolder(string baseFolder)
+    {
+        try
+        {
+            if (!Directory.Exists(baseFolder)) return;
+
+            // A host from an older build may still be running against this
+            // folder, and its name holds no process id to ask about. Age is
+            // what is left, under the same seven days as the process-scoped
+            // folders — but the age of the profile, not of the folder. A
+            // folder's own last write time only moves when its direct entries
+            // change, and the profile is written deeper than that: a folder
+            // last used in August can read March at the top.
+            var profileState = Path.Combine(baseFolder, "EBWebView", "Local State");
+            if (!File.Exists(profileState))
+            {
+                // Nothing here dates the profile, so nothing here says the
+                // folder is unused. Keeping it costs a folder that is not the
+                // one this cleanup is about; deleting it is a claim that was
+                // never checked.
+                Logger.LogDebug(
+                    "[ChatWebView] Leaving the shared WebView2 folder '{Folder}': it has no EBWebView\\Local State to date it.",
+                    baseFolder);
+                return;
+            }
+
+            if (DateTime.UtcNow - File.GetLastWriteTimeUtc(profileState)
+                <= TimeSpan.FromDays(StaleFolderMaxAgeDays))
+            {
+                return;
+            }
+
+            Directory.Delete(baseFolder, recursive: true);
+            Logger.LogDebug(
+                "[ChatWebView] Reclaimed the shared WebView2 folder '{Folder}' left by builds before per-process folders.",
+                baseFolder);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "[ChatWebView] Could not delete the shared WebView2 folder '{Folder}'.", baseFolder);
+        }
     }
 
     /// <summary>
