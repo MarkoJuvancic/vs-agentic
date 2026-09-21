@@ -707,7 +707,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             var psi = new ProcessStartInfo
             {
                 FileName = _options.ClaudeCliPath,
-                Arguments = "-p --output-format text",
+                // --no-session-persistence keeps this throwaway call from writing
+                // a transcript. Without it every new chat leaves a second, unused
+                // CLI session on disk. The flag is sent unconditionally: a CLI
+                // that does not know it prints nothing, and the title falls back
+                // to the first line of the user message.
+                Arguments = "-p --output-format text --no-session-persistence",
                 WorkingDirectory = _options.WorkingDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
