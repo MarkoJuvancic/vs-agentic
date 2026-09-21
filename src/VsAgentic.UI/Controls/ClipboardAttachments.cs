@@ -30,6 +30,9 @@ public static class ClipboardAttachments
     {
         try
         {
+            // Files come first and win over text: copying them in Explorer is
+            // deliberate, and the text some apps publish next to them is the
+            // path we are attaching anyway.
             if (Clipboard.ContainsFileDropList())
             {
                 var attachments = new List<IChatAttachment>();
@@ -41,7 +44,12 @@ public static class ClipboardAttachments
                 if (attachments.Count > 0) return attachments;
             }
 
-            if (Clipboard.ContainsImage())
+            // A bitmap loses to text. Excel, Word and some browsers publish a
+            // picture of the selection next to the text they copy, and taking
+            // the picture would paste an image of the cells the user meant to
+            // paste as text. A screenshot carries no text format, so it still
+            // attaches.
+            if (!Clipboard.ContainsText() && Clipboard.ContainsImage())
             {
                 var source = Clipboard.GetImage();
                 if (source is not null)
