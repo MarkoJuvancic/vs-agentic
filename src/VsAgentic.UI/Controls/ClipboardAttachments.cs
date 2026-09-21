@@ -125,17 +125,21 @@ public static class ClipboardAttachments
         // passed through untouched: decoding keeps only the first frame, which
         // would silently drop the animation.
         if (mediaType == "image/gif")
-            return new ChatImageAttachment(File.ReadAllBytes(path), mediaType);
+            return new ChatImageAttachment(File.ReadAllBytes(path), mediaType, path);
 
         var decoded = new BitmapImage();
         decoded.BeginInit();
         decoded.CacheOption = BitmapCacheOption.OnLoad;
         decoded.UriSource = new Uri(path);
         decoded.EndInit();
-        return FromBitmapSource(decoded);
+        return FromBitmapSource(decoded, path);
     }
 
-    private static ChatImageAttachment FromBitmapSource(BitmapSource source)
+    /// <param name="sourcePath">
+    /// Null for a bitmap off the clipboard, which came from no file the message
+    /// could name.
+    /// </param>
+    private static ChatImageAttachment FromBitmapSource(BitmapSource source, string? sourcePath = null)
     {
         var scale = Math.Min(1.0, (double)MaxEdge / Math.Max(source.PixelWidth, source.PixelHeight));
         BitmapSource final = scale < 1.0
@@ -147,6 +151,6 @@ public static class ClipboardAttachments
 
         using var stream = new MemoryStream();
         encoder.Save(stream);
-        return new ChatImageAttachment(stream.ToArray(), "image/png");
+        return new ChatImageAttachment(stream.ToArray(), "image/png", sourcePath);
     }
 }

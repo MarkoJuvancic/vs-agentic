@@ -13,6 +13,9 @@ public sealed class ChatFileAttachment : IChatAttachment
     /// <summary>Absolute path, as the clipboard reported it.</summary>
     public string FullPath { get; }
 
+    /// <summary>A file attachment is nothing but its path.</summary>
+    public string? SourcePath => FullPath;
+
     /// <summary>File or folder name, shown on the chip above the input box.</summary>
     public string DisplayName { get; }
 

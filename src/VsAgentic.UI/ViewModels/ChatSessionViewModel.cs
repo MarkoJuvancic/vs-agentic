@@ -402,15 +402,15 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     /// <summary>
     /// Attaches an image or a file to the next message. Called by the host when
-    /// the user pastes into the input box. Pasting the same file twice is a slip
-    /// rather than an intent, so those are dropped; images have no path to
-    /// compare and two identical screenshots are plausible enough to keep.
+    /// the user pastes into the input box. Pasting the same path twice is a slip
+    /// rather than an intent, so those are dropped; a screenshot has no path to
+    /// compare and two identical ones are plausible enough to keep.
     /// </summary>
     public void Attach(IChatAttachment attachment)
     {
-        if (attachment is ChatFileAttachment file &&
-            PendingAttachments.OfType<ChatFileAttachment>().Any(
-                f => string.Equals(f.FullPath, file.FullPath, StringComparison.OrdinalIgnoreCase)))
+        if (attachment.SourcePath is { } path &&
+            PendingAttachments.Any(
+                a => string.Equals(a.SourcePath, path, StringComparison.OrdinalIgnoreCase)))
         {
             return;
         }
@@ -427,14 +427,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     /// <summary>
     /// Puts the attached paths above the user's text, so the model knows what it
-    /// has been handed before it reads the question about it.
+    /// has been handed before it reads the question about it. Images that came
+    /// from a file are named here too, even though their bytes travel inline:
+    /// without that, a paste of several photos arrives as thumbnails the model
+    /// cannot tell apart, next to a list of the ones that did not fit inline.
     /// </summary>
-    private static string WithFileReferences(string text, IReadOnlyList<ChatFileAttachment> files)
+    private static string WithFileReferences(string text, IReadOnlyList<IChatAttachment> attachments)
     {
         // Backticks stop Markdown from eating the backslashes when the message is
         // rendered back into the chat, and mark the path as literal for the CLI.
-        var list = string.Join("\n", files.Select(f => $"- `{f.FullPath}`"));
-        var header = files.Count == 1 ? "Attached file:" : "Attached files:";
+        var list = string.Join("\n", attachments.Select(a => $"- `{a.SourcePath}`"));
+        var header = attachments.Count == 1 ? "Attached file:" : "Attached files:";
 
         return string.IsNullOrEmpty(text)
             ? $"{header}\n{list}"
@@ -448,7 +451,9 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         InputText = "";
 
         var images = PendingAttachments.OfType<ChatImageAttachment>().ToList();
-        var files = PendingAttachments.OfType<ChatFileAttachment>().ToList();
+        // In the order they were pasted, so the names line up with the
+        // thumbnails the message carries.
+        var named = PendingAttachments.Where(a => a.SourcePath is not null).ToList();
         var sentImages = images.Count > 0 ? images : null;
         PendingAttachments.Clear();
         SendCommand.NotifyCanExecuteChanged();
@@ -457,8 +462,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // reads them off disk with the same tools it uses for the rest of the
         // project. Listing them in the message itself also leaves a record in
         // the transcript of what went out.
-        if (files.Count > 0)
-            message = WithFileReferences(message, files);
+        if (named.Count > 0)
+            message = WithFileReferences(message, named);
 
         // Written next to the session so reopening it shows the images again.
         var storedImageNames = sentImages is null

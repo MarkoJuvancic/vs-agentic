@@ -150,12 +150,15 @@
         <ScaleTransform x:Key="ChromeZoom" ScaleX="1" ScaleY="1"/>
 
         <!-- Attachment chips above the input box. An image shows a thumbnail; a
-             file has nothing worth previewing, so it shows its name instead. -->
+             file has nothing worth previewing, so it shows its name instead.
+             The tooltip is the path both came from, and stays away on a
+             screenshot, which came from no file. -->
         <DataTemplate DataType="{x:Type svc:ChatImageAttachment}">
             <Border Margin="0,0,6,6"
                     BorderThickness="1"
                     CornerRadius="3"
-                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}">
+                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                    ToolTip="{Binding SourcePath}">
                 <Grid>
                     <Image Source="{Binding Converter={StaticResource AttachmentPreviewConverter}}"
                            Height="56"
@@ -181,7 +184,7 @@
                     Padding="6,3"
                     VerticalAlignment="Top"
                     BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
-                    ToolTip="{Binding FullPath}">
+                    ToolTip="{Binding SourcePath}">
                 <StackPanel Orientation="Horizontal">
                     <imaging:CrispImage Width="14" Height="14"
                                         VerticalAlignment="Center"

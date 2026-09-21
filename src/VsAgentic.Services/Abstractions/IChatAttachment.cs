@@ -10,4 +10,12 @@ public interface IChatAttachment
 {
     /// <summary>Label for the attachment chip above the input box.</summary>
     string DisplayName { get; }
+
+    /// <summary>
+    /// Where the attachment came from on disk, or null when it came from
+    /// nowhere — a screenshot has no path. Every attachment that has one is
+    /// named in the message, so the model can tell which is which, and the same
+    /// path is only attached once.
+    /// </summary>
+    string? SourcePath { get; }
 }
