@@ -330,13 +330,24 @@
                         MouseLeftButtonUp="ResizeGrip_MouseLeftButtonUp"
                         ToolTip="Drag to resize input"/>
 
-                <!-- Rounded input container holding the textbox + status bar -->
-                <Border Grid.Row="1"
+                <!-- Rounded input container holding the textbox + status bar.
+
+                     The whole box takes a drop, not just the textbox: the strip
+                     of attachments and the status bar are part of what the user
+                     aims at, and a file dropped on either belongs to the same
+                     message. Only a file drop is taken here; text dragged out of
+                     an editor falls through to the textbox, which inserts it. -->
+                <Border x:Name="PromptBox"
+                        Grid.Row="1"
                         CornerRadius="4"
                         Background="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBackgroundKey}}"
                         BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
                         BorderThickness="1"
-                        SnapsToDevicePixels="True">
+                        SnapsToDevicePixels="True"
+                        AllowDrop="True"
+                        PreviewDragOver="PromptBox_PreviewDragOver"
+                        PreviewDragLeave="PromptBox_PreviewDragLeave"
+                        PreviewDrop="PromptBox_PreviewDrop">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -465,17 +476,32 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
 
-                                <!-- @-mention attach button: opens the file/folder picker popup -->
-                                <Button Grid.Column="0"
-                                        x:Name="AtMentionButton"
-                                        Style="{StaticResource IconButtonStyle}"
-                                        Click="AtMentionButton_Click"
-                                        ToolTip="Insert file or folder reference (@)">
-                                    <TextBlock Text="@"
-                                               FontSize="13"
-                                               FontWeight="Bold"
-                                               Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
-                                </Button>
+                                <!-- Left of the status readings: the two ways of
+                                     putting a file into the next message. They are
+                                     not the same thing. @ writes a reference into
+                                     the text and only reaches the workspace; the
+                                     paperclip attaches a file from anywhere, and an
+                                     image attached this way travels inline. -->
+                                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                    <!-- @-mention attach button: opens the file/folder picker popup -->
+                                    <Button x:Name="AtMentionButton"
+                                            Style="{StaticResource IconButtonStyle}"
+                                            Click="AtMentionButton_Click"
+                                            ToolTip="Insert file or folder reference (@)">
+                                        <TextBlock Text="@"
+                                                   FontSize="13"
+                                                   FontWeight="Bold"
+                                                   Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+                                    </Button>
+
+                                    <Button x:Name="AttachFileButton"
+                                            Style="{StaticResource IconButtonStyle}"
+                                            Click="AttachFileButton_Click"
+                                            ToolTip="Attach files to the next message.&#x0a;Images go inline; anything else is sent as a path.">
+                                        <imaging:CrispImage Width="16" Height="16"
+                                                            Moniker="{x:Static catalog:KnownMonikers.AddAttachment}"/>
+                                    </Button>
+                                </StackPanel>
 
                                 <!-- Status info: usage readings and the model /
                                      effort pickers, right-aligned towards Send.
@@ -590,6 +616,18 @@
                                 </Grid>
                             </Grid>
                         </Border>
+
+                        <!-- Shown while a file is dragged over the box. An overlay
+                             rather than a colour on the container itself: setting
+                             BorderBrush from code would replace the themed brush
+                             with a local value and keep it after the drop. -->
+                        <Border x:Name="DropHighlight"
+                                Grid.Row="0" Grid.RowSpan="3"
+                                CornerRadius="4"
+                                BorderThickness="2"
+                                BorderBrush="{DynamicResource {x:Static vs:VsBrushes.HighlightKey}}"
+                                IsHitTestVisible="False"
+                                Visibility="Collapsed"/>
                     </Grid>
                 </Border>
             </Grid>

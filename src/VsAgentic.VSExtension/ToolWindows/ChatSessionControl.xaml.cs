@@ -393,6 +393,89 @@ public partial class ChatSessionControl : UserControl
         ShowMentionPopup("");
     }
 
+    private void AttachFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not ChatSessionViewModel vm) return;
+
+        // No type filter: the CLI reads whatever it is handed, and the picker
+        // reaching only the kinds we inline would hide every other file the
+        // model can be asked about.
+        var picker = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Attach to message",
+            Filter = "All files (*.*)|*.*",
+            Multiselect = true,
+            CheckFileExists = true,
+        };
+
+        if (picker.ShowDialog() != true) return;
+
+        Attach(vm, picker.FileNames);
+        InputTextBox.Focus();
+    }
+
+    private void PromptBox_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        // Anything that is not a file is left alone, so text dragged out of an
+        // editor still drops into the textbox as text.
+        if (!TryGetDroppedPaths(e.Data, out _)) return;
+
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        DropHighlight.Visibility = Visibility.Visible;
+    }
+
+    private void PromptBox_PreviewDragLeave(object sender, DragEventArgs e)
+    {
+        // Hidden without asking where the cursor went. The textbox takes drops of
+        // its own, so crossing from the box's chrome into it also raises a leave,
+        // but WPF hands the leave and the next DragOver to us in one pass over
+        // the same mouse move, and the DragOver puts the highlight straight back.
+        // Leaving for good, and a drag cancelled with Escape, both end here too,
+        // which a test on the cursor position would miss: Escape reports the last
+        // point inside the box.
+        DropHighlight.Visibility = Visibility.Collapsed;
+    }
+
+    private void PromptBox_PreviewDrop(object sender, DragEventArgs e)
+    {
+        DropHighlight.Visibility = Visibility.Collapsed;
+
+        if (DataContext is not ChatSessionViewModel vm) return;
+        if (!TryGetDroppedPaths(e.Data, out var paths)) return;
+
+        Attach(vm, paths!);
+        // Otherwise the textbox would go on to handle the same drop.
+        e.Handled = true;
+        InputTextBox.Focus();
+    }
+
+    /// <summary>
+    /// Reads the paths a drag is carrying, if it is carrying any. The data
+    /// object belongs to the source process and can fail on either call, which
+    /// is not a reason to lose the drop's other formats.
+    /// </summary>
+    private static bool TryGetDroppedPaths(IDataObject data, out string[]? paths)
+    {
+        paths = null;
+        try
+        {
+            if (!data.GetDataPresent(DataFormats.FileDrop)) return false;
+            paths = data.GetData(DataFormats.FileDrop) as string[];
+        }
+        catch
+        {
+            return false;
+        }
+        return paths is { Length: > 0 };
+    }
+
+    private static void Attach(ChatSessionViewModel vm, IEnumerable<string?> paths)
+    {
+        foreach (var attachment in AttachmentReader.FromPaths(paths))
+            vm.Attach(attachment);
+    }
+
     private void InputTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_suppressTextChanged) return;
