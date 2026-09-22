@@ -37,11 +37,17 @@ public partial class PermissionBannerViewModel : ObservableObject, IBannerViewMo
     public bool CanAllowForSession => _sessionRules.Count > 0;
 
     /// <summary>
-    /// Names every rule about to be granted, e.g. <c>Bash(cd:*) Bash(git push:*)</c>,
-    /// so a compound command does not quietly grant more than it appears to.
+    /// Names every rule about to be granted, e.g. <c>Bash(cd:*) Bash(git push:*)</c>.
+    /// This reads on the banner itself, next to the command: a compound command
+    /// can carry several rules, and what a click grants has to be visible
+    /// without hovering anything.
     /// </summary>
+    public string SessionRulesText => string.Join("   ", _sessionRules.Select(r => r.Display));
+
+    /// <summary>Says how long the rules last, which the line on the banner does not.</summary>
     public string AllowForSessionTooltip =>
-        $"Allow {string.Join("  ", _sessionRules.Select(r => r.Display))} for the rest of this session";
+        "The CLI stops asking for calls these rules match. They live in the CLI "
+        + "process, so they are gone when it restarts and nothing is written to disk.";
 
     public PermissionBannerViewModel(PermissionRequest request, Action<PermissionDecision> onResolved)
     {
