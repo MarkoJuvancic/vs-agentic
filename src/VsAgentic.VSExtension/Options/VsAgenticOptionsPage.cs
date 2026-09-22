@@ -63,7 +63,7 @@ public class VsAgenticOptionsPage : DialogPage
 
     [Category("Sessions")]
     [DisplayName("Keep days of activity")]
-    [Description("When the extension starts, sessions whose last activity is older than this many days are deleted. Default: 30. Set to 0 to disable cleanup.")]
+    [Description("When the extension starts, a session whose last activity is older than this many days is archived, and a session that has been in the archive for this long is deleted. A session is therefore kept for twice this many days before anything is lost. Default: 30. Set to 0 to disable cleanup.")]
     [DefaultValue(30)]
     public int KeepActivityDays { get; set; } = 30;
 }
