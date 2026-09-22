@@ -450,6 +450,18 @@ var STATUS_COLORS = { Pending: 'var(--info)', Success: 'var(--success)', Error: 
 // File path regex: require extension starts lowercase to avoid false positives like RTR.MobileApp
 var filePathRe = /(?:[A-Za-z]:[\\\/]|\.{0,2}\/|(?=[\w@]))(?:[\w\-\.@]+[\\\/])+[\w\-\.]+\.[a-z][a-zA-Z0-9]{0,9}(?::(\d+)(?:-\d+)?)?/g;
 
+// The same shape with spaces allowed inside a segment, anchored so that the
+// whole string has to be the path. A space may only be part of a path where
+// something other than the pattern says where the path ends: a code span, or
+// double quotes. In running text nothing does, and a greedy segment would eat
+// the words between two paths.
+var wholePathRe = /^(?:[A-Za-z]:[\\\/]|\.{0,2}\/|(?=[\w@]))(?:[\w\-\.@ ]+[\\\/])+[\w\-\.@ ]+\.[a-z][a-zA-Z0-9]{0,9}(?::(\d+)(?:-\d+)?)?$/;
+
+// Scans plain text for a bare path, or for a double-quoted run to try
+// wholePathRe on. Single quotes are left out on purpose: an apostrophe in
+// ordinary prose opens a run that swallows half a sentence.
+var textScanRe = new RegExp('"[^"\\r\\n]+"|' + filePathRe.source, 'g');
+
 function linkifyFilePaths(container) {
     var codes = container.querySelectorAll('code');
     for (var i = 0; i < codes.length; i++) {
@@ -457,13 +469,14 @@ function linkifyFilePaths(container) {
         if (code.closest('pre')) continue;
         if (code.querySelector('a')) continue;
         var text = code.textContent;
-        filePathRe.lastIndex = 0;
-        if (filePathRe.test(text) && text.match(filePathRe).length === 1 && text.trim() === text.match(filePathRe)[0]) {
-            var match = text.match(filePathRe)[0];
+        var whole = text.trim();
+        // The backticks are the boundary, so the whole span either is a path
+        // or is not one.
+        if (wholePathRe.test(whole)) {
             var a = document.createElement('a');
             a.href = '#';
             a.className = 'file-link';
-            a.dataset.path = match;
+            a.dataset.path = whole;
             a.textContent = text;
             a.title = 'Open in editor';
             code.textContent = '';
@@ -491,23 +504,34 @@ function linkifyFilePaths(container) {
         var node = textNodes[k];
         if (node.parentNode.closest('pre, code, a')) continue;
         var txt = node.nodeValue;
-        filePathRe.lastIndex = 0;
-        if (!filePathRe.test(txt)) continue;
-        filePathRe.lastIndex = 0;
+        textScanRe.lastIndex = 0;
+        if (!textScanRe.test(txt)) continue;
+        textScanRe.lastIndex = 0;
         var frag = document.createDocumentFragment();
         var lastIdx = 0;
         var m;
-        while ((m = filePathRe.exec(txt)) !== null) {
-            if (m.index > lastIdx)
-                frag.appendChild(document.createTextNode(txt.slice(lastIdx, m.index)));
+        while ((m = textScanRe.exec(txt)) !== null) {
+            var quoted = m[0].charAt(0) === '"';
+            var start = quoted ? m.index + 1 : m.index;
+            var end = quoted ? m.index + m[0].length - 1 : m.index + m[0].length;
+            var path = txt.slice(start, end).trim();
+            if (quoted && !wholePathRe.test(path)) {
+                // Quoted, but not a path. Resume just inside the opening quote,
+                // so a plain path inside a quoted sentence is still found.
+                textScanRe.lastIndex = m.index + 1;
+                continue;
+            }
+            if (start > lastIdx)
+                frag.appendChild(document.createTextNode(txt.slice(lastIdx, start)));
             var a = document.createElement('a');
             a.href = '#';
             a.className = 'file-link';
-            a.dataset.path = m[0];
-            a.textContent = m[0];
+            a.dataset.path = path;
+            // The quotes stay as text; only what is between them is the link.
+            a.textContent = txt.slice(start, end);
             a.title = 'Open in editor';
             frag.appendChild(a);
-            lastIdx = filePathRe.lastIndex;
+            lastIdx = end;
         }
         if (lastIdx < txt.length)
             frag.appendChild(document.createTextNode(txt.slice(lastIdx)));
