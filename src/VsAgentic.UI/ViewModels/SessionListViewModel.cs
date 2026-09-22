@@ -121,6 +121,14 @@ public partial class SessionListViewModel : ObservableObject
     public event Action<SessionInfo>? SessionOpenRequested;
     public event Action<SessionInfo>? SessionRemoved;
 
+    /// <summary>
+    /// Asked before a session is deleted; returns true to go ahead. The host
+    /// supplies it, because deleting a session is not reversible and the shell
+    /// owns the dialog. Left null the delete proceeds unasked, which keeps the
+    /// view model usable outside Visual Studio.
+    /// </summary>
+    public Func<SessionInfo, bool>? ConfirmDelete { get; set; }
+
     public SessionListViewModel()
     {
         FilteredSessions = CollectionViewSource.GetDefaultView(Sessions);
@@ -321,6 +329,8 @@ public partial class SessionListViewModel : ObservableObject
     private async Task RemoveSessionAsync(SessionInfo? session)
     {
         if (session is null) return;
+        if (ConfirmDelete is not null && !ConfirmDelete(session)) return;
+
         session.IsActive = false;
         Sessions.Remove(session);
         SessionRemoved?.Invoke(session);
