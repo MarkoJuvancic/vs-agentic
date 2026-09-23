@@ -113,13 +113,31 @@ public partial class ChatSessionControl : UserControl
             colors[cssVar] = $"#{wpfColor.R:X2}{wpfColor.G:X2}{wpfColor.B:X2}";
         }
 
+        // Where the shell palette has the color, it comes from the theme the
+        // user picked; the environment key is what a Visual Studio 2026 theme
+        // leaves to its fallback. See ShellPalette.
+        void MapShell(string cssVar, string shellColor, ThemeResourceKey fallback)
+        {
+            if (ShellPalette.TryGetColor(shellColor) is not Color color)
+            {
+                Map(cssVar, fallback);
+                return;
+            }
+
+            // Some of these colors are meant to sit over what is behind them,
+            // a control edge above all, so the alpha is passed on.
+            colors[cssVar] = color.A == byte.MaxValue
+                ? $"#{color.R:X2}{color.G:X2}{color.B:X2}"
+                : $"#{color.R:X2}{color.G:X2}{color.B:X2}{color.A:X2}";
+        }
+
         Map("--bg-primary", EnvironmentColors.ToolWindowBackgroundColorKey);
         Map("--bg-secondary", EnvironmentColors.CommandBarGradientBeginColorKey);
-        Map("--bg-input", EnvironmentColors.ComboBoxBackgroundColorKey);
-        Map("--text-primary", EnvironmentColors.ToolWindowTextColorKey);
-        Map("--text-heading", EnvironmentColors.ToolWindowTextColorKey);
-        Map("--text-muted", EnvironmentColors.CommandBarTextInactiveColorKey);
-        Map("--border", EnvironmentColors.ToolWindowBorderColorKey);
+        MapShell("--bg-input", "ControlFillActiveInput", EnvironmentColors.ComboBoxBackgroundColorKey);
+        MapShell("--text-primary", "TextFillPrimary", EnvironmentColors.ToolWindowTextColorKey);
+        MapShell("--text-heading", "TextFillPrimary", EnvironmentColors.ToolWindowTextColorKey);
+        MapShell("--text-muted", "TextFillSecondary", EnvironmentColors.CommandBarTextInactiveColorKey);
+        MapShell("--border", "ControlStrokeDefault", EnvironmentColors.ToolWindowBorderColorKey);
         Map("--code-bg", EnvironmentColors.ToolWindowContentGridColorKey);
         Map("--pre-bg", EnvironmentColors.ToolWindowBackgroundColorKey);
         Map("--thinking-bg", EnvironmentColors.CommandBarGradientBeginColorKey);
