@@ -115,16 +115,15 @@ public partial class ChatSessionControl : UserControl
         Map("--text-heading", EnvironmentColors.ToolWindowTextColorKey);
         Map("--text-muted", EnvironmentColors.CommandBarTextInactiveColorKey);
         Map("--border", EnvironmentColors.ToolWindowBorderColorKey);
-        // Use VS hyperlink color (theme-driven) rather than the OS system
-        // highlight, which on Win11 is often violet/purple and clashes with
-        // the dark/light VS theme.
-        Map("--accent", EnvironmentColors.PanelHyperlinkColorKey);
         Map("--code-bg", EnvironmentColors.ToolWindowContentGridColorKey);
         Map("--pre-bg", EnvironmentColors.ToolWindowBackgroundColorKey);
         Map("--thinking-bg", EnvironmentColors.CommandBarGradientBeginColorKey);
 
+        var accent = ThemeAccent();
+        colors["--accent"] = ToCssHex(accent);
+
         var toolWindowBackground = VSColorTheme.GetThemedColor(EnvironmentColors.ToolWindowBackgroundColorKey);
-        var promptAccent = VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
+        var promptAccent = accent;
         var promptBorderBase = VSColorTheme.GetThemedColor(EnvironmentColors.ToolWindowBorderColorKey);
         var promptBgBlend = RelativeLuminance(toolWindowBackground) >= 0.5 ? 0.08 : 0.12;
 
@@ -140,6 +139,55 @@ public partial class ChatSessionControl : UserControl
 
         _ = ChatWebView.SetThemeColorsAsync(colors);
     }
+
+    /// <summary>
+    /// The color the chat uses for links, focus borders and the prompt accent.
+    /// </summary>
+    /// <remarks>
+    /// The OS system highlight is deliberately not used: on Windows 11 it is
+    /// often violet and clashes with the VS theme.
+    /// </remarks>
+    private static System.Drawing.Color ThemeAccent() =>
+        // A theme written for the Visual Studio 2026 shell defines the Shell
+        // category and leaves the Environment category to its fallback theme.
+        // PanelHyperlink then carries the fallback's color, not the theme's, so
+        // ask the shell first and keep the environment key for VS 2022.
+        TryGetShellColor("HyperlinkFillPrimary")
+            ?? VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
+
+    /// <summary>
+    /// Reads one color of the Visual Studio 2026 shell palette. Returns null on
+    /// Visual Studio 2022, whose shell has no such category, and on any theme
+    /// that leaves the color undefined.
+    /// </summary>
+    private static System.Drawing.Color? TryGetShellColor(string name)
+    {
+        var application = Application.Current;
+        if (application is null)
+            return null;
+
+        // The palette stores these colors as background values, so that is the
+        // key type the theme registers them under.
+        var key = new ThemeResourceKey(ShellCategory, name, ThemeResourceKeyType.BackgroundColor);
+
+        var resource = application.TryFindResource(key);
+        var color = resource switch
+        {
+            Color themeColor => themeColor,
+            SolidColorBrush themeBrush => themeBrush.Color,
+            _ => (Color?)null,
+        };
+
+        return color is Color found
+            ? System.Drawing.Color.FromArgb(found.A, found.R, found.G, found.B)
+            : null;
+    }
+
+    /// <summary>
+    /// Category of the shell palette that Visual Studio 2026 themes are built
+    /// on. Named "Shell" in a theme's .pkgdef.
+    /// </summary>
+    private static readonly Guid ShellCategory = new("73708DED-2D56-4AAD-B8EB-73B20D3F4BFF");
 
     private static System.Drawing.Color Blend(System.Drawing.Color from, System.Drawing.Color to, double amount)
     {
