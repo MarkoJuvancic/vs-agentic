@@ -153,36 +153,12 @@ public partial class ChatSessionControl : UserControl
     /// often violet and clashes with the VS theme.
     /// </remarks>
     private static System.Drawing.Color ThemeAccent() =>
-        // A theme written for the Visual Studio 2026 shell defines the Shell
-        // category and leaves the Environment category to its fallback theme.
-        // PanelHyperlink then carries the fallback's color, not the theme's, so
-        // ask the shell first and keep the environment key for VS 2022.
-        TryGetShellColor("HyperlinkFillPrimary") is Color accent
+        // A theme written for the Visual Studio 2026 shell leaves PanelHyperlink
+        // to its fallback theme, so ask the shell palette first and keep the
+        // environment key for Visual Studio 2022. See ShellPalette.
+        ShellPalette.TryGetColor("HyperlinkFillPrimary") is Color accent
             ? System.Drawing.Color.FromArgb(accent.A, accent.R, accent.G, accent.B)
             : VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
-
-    /// <summary>
-    /// Reads one color of the Visual Studio 2026 shell palette. Returns null on
-    /// Visual Studio 2022, whose shell has no such category, and on any theme
-    /// that leaves the color undefined.
-    /// </summary>
-    private static Color? TryGetShellColor(string name)
-    {
-        var application = Application.Current;
-        if (application is null)
-            return null;
-
-        // The palette stores these colors as background values, so that is the
-        // key type the theme registers them under.
-        var key = new ThemeResourceKey(ShellCategory, name, ThemeResourceKeyType.BackgroundColor);
-
-        return application.TryFindResource(key) switch
-        {
-            Color themeColor => themeColor,
-            SolidColorBrush themeBrush => themeBrush.Color,
-            _ => null,
-        };
-    }
 
     /// <summary>
     /// The environment brushes the chrome of this window binds to, each paired
@@ -207,34 +183,7 @@ public partial class ChatSessionControl : UserControl
     /// Points the prompt box and the status row at the shell palette, so that a
     /// theme which defines only the shell colors still reaches them.
     /// </summary>
-    /// <remarks>
-    /// The overrides are entered in this control's own resources, under the
-    /// very keys the XAML binds with DynamicResource. Lookup finds them before
-    /// it reaches the environment ones, and nothing outside this window sees
-    /// them. A theme that leaves a color undefined drops its override, and the
-    /// environment brush takes over again.
-    /// </remarks>
-    private void ApplyShellBrushes()
-    {
-        foreach (var (brush, shellColor) in ChromeBrushes)
-        {
-            if (TryGetShellColor(shellColor) is not Color color)
-            {
-                Resources.Remove(brush);
-                continue;
-            }
-
-            var themed = new SolidColorBrush(color);
-            themed.Freeze();
-            Resources[brush] = themed;
-        }
-    }
-
-    /// <summary>
-    /// Category of the shell palette that Visual Studio 2026 themes are built
-    /// on. Named "Shell" in a theme's .pkgdef.
-    /// </summary>
-    private static readonly Guid ShellCategory = new("73708DED-2D56-4AAD-B8EB-73B20D3F4BFF");
+    private void ApplyShellBrushes() => ShellPalette.OverrideBrushes(this, ChromeBrushes);
 
     private static System.Drawing.Color Blend(System.Drawing.Color from, System.Drawing.Color to, double amount)
     {
