@@ -62,6 +62,7 @@ public partial class ChatSessionControl : UserControl
 
         // Apply VS theme colors to the WebView
         ApplyThemeColors();
+        ApplyShellBrushes();
 
         // Re-apply when VS theme changes
         VSColorTheme.ThemeChanged += OnThemeChanged;
@@ -95,7 +96,11 @@ public partial class ChatSessionControl : UserControl
 
     private void OnThemeChanged(ThemeChangedEventArgs e)
     {
-        Dispatcher.BeginInvoke(new Action(() => ApplyThemeColors()));
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            ApplyThemeColors();
+            ApplyShellBrushes();
+        }));
     }
 
     private void ApplyThemeColors()
@@ -152,15 +157,16 @@ public partial class ChatSessionControl : UserControl
         // category and leaves the Environment category to its fallback theme.
         // PanelHyperlink then carries the fallback's color, not the theme's, so
         // ask the shell first and keep the environment key for VS 2022.
-        TryGetShellColor("HyperlinkFillPrimary")
-            ?? VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
+        TryGetShellColor("HyperlinkFillPrimary") is Color accent
+            ? System.Drawing.Color.FromArgb(accent.A, accent.R, accent.G, accent.B)
+            : VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
 
     /// <summary>
     /// Reads one color of the Visual Studio 2026 shell palette. Returns null on
     /// Visual Studio 2022, whose shell has no such category, and on any theme
     /// that leaves the color undefined.
     /// </summary>
-    private static System.Drawing.Color? TryGetShellColor(string name)
+    private static Color? TryGetShellColor(string name)
     {
         var application = Application.Current;
         if (application is null)
@@ -170,17 +176,58 @@ public partial class ChatSessionControl : UserControl
         // key type the theme registers them under.
         var key = new ThemeResourceKey(ShellCategory, name, ThemeResourceKeyType.BackgroundColor);
 
-        var resource = application.TryFindResource(key);
-        var color = resource switch
+        return application.TryFindResource(key) switch
         {
             Color themeColor => themeColor,
             SolidColorBrush themeBrush => themeBrush.Color,
-            _ => (Color?)null,
+            _ => null,
         };
+    }
 
-        return color is Color found
-            ? System.Drawing.Color.FromArgb(found.A, found.R, found.G, found.B)
-            : null;
+    /// <summary>
+    /// The environment brushes the chrome of this window binds to, each paired
+    /// with the shell color that carries the same meaning in a Visual Studio
+    /// 2026 theme.
+    /// </summary>
+    // VsBrushes exposes its keys as object, which is also what a resource
+    // dictionary takes, so the pairs are held that way.
+    private static readonly (object Brush, string ShellColor)[] ChromeBrushes =
+    {
+        (VsBrushes.ComboBoxBackgroundKey, "ControlFillActiveInput"),
+        (VsBrushes.ComboBoxBorderKey, "ControlStrokeDefault"),
+        (VsBrushes.WindowTextKey, "TextFillPrimary"),
+        (VsBrushes.GrayTextKey, "TextFillSecondary"),
+        (VsBrushes.PanelHyperlinkKey, "HyperlinkFillPrimary"),
+        (VsBrushes.CommandBarMouseOverBackgroundGradientKey, "SubtleFillSecondary"),
+        (VsBrushes.CommandBarMouseDownBackgroundGradientKey, "SubtleFillTertiary"),
+        (VsBrushes.CommandBarSelectedKey, "SubtleFillTertiary"),
+    };
+
+    /// <summary>
+    /// Points the prompt box and the status row at the shell palette, so that a
+    /// theme which defines only the shell colors still reaches them.
+    /// </summary>
+    /// <remarks>
+    /// The overrides are entered in this control's own resources, under the
+    /// very keys the XAML binds with DynamicResource. Lookup finds them before
+    /// it reaches the environment ones, and nothing outside this window sees
+    /// them. A theme that leaves a color undefined drops its override, and the
+    /// environment brush takes over again.
+    /// </remarks>
+    private void ApplyShellBrushes()
+    {
+        foreach (var (brush, shellColor) in ChromeBrushes)
+        {
+            if (TryGetShellColor(shellColor) is not Color color)
+            {
+                Resources.Remove(brush);
+                continue;
+            }
+
+            var themed = new SolidColorBrush(color);
+            themed.Freeze();
+            Resources[brush] = themed;
+        }
     }
 
     /// <summary>
