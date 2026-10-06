@@ -84,4 +84,17 @@ public interface IChatService
     /// new credentials.
     /// </summary>
     void LaunchLogin();
+
+    /// <summary>
+    /// The tasks the CLI is running in the background right now. Empty when
+    /// none run, and after the CLI process stops, which ends them.
+    /// </summary>
+    IReadOnlyList<BackgroundTask> BackgroundTasks { get; }
+
+    /// <summary>
+    /// Raised when <see cref="BackgroundTasks"/> changes, carrying the new list.
+    /// Can fire between turns. Raised on a background thread; hosts must
+    /// marshal to the UI thread.
+    /// </summary>
+    event Action<IReadOnlyList<BackgroundTask>>? BackgroundTasksChanged;
 }

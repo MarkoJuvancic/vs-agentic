@@ -181,8 +181,38 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _questionBroker.QuestionRequested += OnQuestionBrokerRequested;
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+        chatService.BackgroundTasksChanged += OnChatServiceBackgroundTasksChanged;
 
         InitializeUsage(chatService, options.Value);
+    }
+
+    // ── Background tasks ──────────────────────────────────────────────────
+    // Commands the CLI runs with run_in_background. They outlive the turn that
+    // started them, so the strip above the input box is the only place that
+    // shows they are still running.
+
+    [ObservableProperty]
+    private bool _hasBackgroundTasks;
+
+    [ObservableProperty]
+    private string _backgroundTasksText = "";
+
+    [ObservableProperty]
+    private string _backgroundTasksTooltip = "";
+
+    private void OnChatServiceBackgroundTasksChanged(IReadOnlyList<BackgroundTask> tasks)
+    {
+        Dispatch(() =>
+        {
+            HasBackgroundTasks = tasks.Count > 0;
+            BackgroundTasksText = tasks.Count switch
+            {
+                0 => "",
+                1 => "Running in background: " + tasks[0].Description,
+                _ => $"{tasks.Count} tasks running in background",
+            };
+            BackgroundTasksTooltip = string.Join("\n", tasks.Select(t => "• " + t.Description));
+        });
     }
 
     private void OnChatServiceLoginRequired(string? errorMessage)
@@ -732,6 +762,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
                 _chatService.ModelChanged -= OnChatServiceModelChanged;
+                _chatService.BackgroundTasksChanged -= OnChatServiceBackgroundTasksChanged;
             }
         }
         catch { }

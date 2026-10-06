@@ -521,6 +521,44 @@
                        FontSize="12" FontStyle="Italic"/>
         </Border>
 
+        <!-- Background tasks: commands started with run_in_background. They
+             outlive the turn, so this strip stays up between turns until the
+             CLI reports them done. The pulse uses opacity only, so it needs no
+             accent color from the theme. -->
+        <Border DockPanel.Dock="Bottom"
+                LayoutTransform="{StaticResource ChromeZoom}"
+                Margin="6,4,6,0"
+                Padding="8,4"
+                CornerRadius="4"
+                BorderThickness="1"
+                BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}"
+                Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
+                ToolTip="{Binding BackgroundTasksTooltip}"
+                Visibility="{Binding HasBackgroundTasks, Converter={StaticResource BoolToVis}}">
+            <DockPanel>
+                <Ellipse DockPanel.Dock="Left"
+                         Width="8" Height="8"
+                         Margin="0,0,8,0"
+                         VerticalAlignment="Center"
+                         Fill="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}">
+                    <Ellipse.Triggers>
+                        <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                    <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                     From="1" To="0.2" Duration="0:0:0.8"/>
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </Ellipse.Triggers>
+                </Ellipse>
+                <TextBlock Text="{Binding BackgroundTasksText}"
+                           TextTrimming="CharacterEllipsis"
+                           FontSize="12"
+                           Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+            </DockPanel>
+        </Border>
+
         <!-- Banner host: permission / question / login banner. The DataTemplates
              above pick the matching UserControl by VM type. The host collapses
              when ActiveBanner is null so it consumes no space when idle. -->

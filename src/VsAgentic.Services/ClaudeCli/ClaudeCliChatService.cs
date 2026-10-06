@@ -223,6 +223,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 FinalizeOpenBlocks(turn);
                 turn.TextDeltas.Writer.TryComplete();
             }
+
+            // Background tasks are children of the CLI and end with it.
+            SetBackgroundTasks(Array.Empty<BackgroundTask>());
         }
     }
 
@@ -254,6 +257,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private void HandleSystemEvent(JsonElement evt)
     {
         var subtype = evt.TryGetProperty("subtype", out var s) ? s.GetString() : null;
+        if (subtype == "background_tasks_changed")
+        {
+            HandleBackgroundTasksChanged(evt);
+            return;
+        }
         if (subtype != "init") return;
         if (evt.TryGetProperty("session_id", out var sid))
         {
@@ -282,6 +290,40 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _logger.LogInformation("[ClaudeCli] Available tools ({Count}): {Tools}", names.Count, string.Join(", ", names));
         }
     }
+
+    // The event carries the whole list of running tasks, not a change, so the
+    // list is replaced each time. It arrives between turns as well.
+    private void HandleBackgroundTasksChanged(JsonElement evt)
+    {
+        var tasks = new List<BackgroundTask>();
+        if (evt.TryGetProperty("tasks", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var t in arr.EnumerateArray())
+            {
+                var id = t.TryGetProperty("task_id", out var ip) ? ip.GetString() : null;
+                if (string.IsNullOrEmpty(id)) continue;
+                var description = t.TryGetProperty("description", out var dp) ? dp.GetString() : null;
+                var type = t.TryGetProperty("task_type", out var tp) ? tp.GetString() : null;
+                tasks.Add(new BackgroundTask(id!, string.IsNullOrWhiteSpace(description) ? id! : description!, type));
+            }
+        }
+        SetBackgroundTasks(tasks);
+    }
+
+    private void SetBackgroundTasks(IReadOnlyList<BackgroundTask> tasks)
+    {
+        if (tasks.Count == 0 && _backgroundTasks.Count == 0) return;
+        _backgroundTasks = tasks;
+        _logger.LogInformation("[ClaudeCli] Background tasks: {Count}", tasks.Count);
+        try { BackgroundTasksChanged?.Invoke(tasks); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] BackgroundTasksChanged handler threw"); }
+    }
+
+    private volatile IReadOnlyList<BackgroundTask> _backgroundTasks = Array.Empty<BackgroundTask>();
+
+    public IReadOnlyList<BackgroundTask> BackgroundTasks => _backgroundTasks;
+
+    public event Action<IReadOnlyList<BackgroundTask>>? BackgroundTasksChanged;
 
     private async Task HandleAssistantEventAsync(JsonElement evt)
     {
