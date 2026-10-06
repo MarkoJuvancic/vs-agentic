@@ -295,6 +295,18 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // even when its content block is one we do not render.
         AccountUsage(msg);
 
+        // A failed sign-in arrives as a synthetic assistant message whose text
+        // is the error, tagged with "error": "authentication_failed". The tag
+        // is a steadier signal than the wording. Do not render the text: the
+        // result event that follows raises the login banner.
+        if (evt.TryGetProperty("error", out var errorProp)
+            && errorProp.ValueKind == JsonValueKind.String
+            && errorProp.GetString() == "authentication_failed")
+        {
+            turn.AuthFailed = true;
+            return;
+        }
+
         if (!msg.TryGetProperty("content", out var contentArr)) return;
         if (contentArr.ValueKind != JsonValueKind.Array) return;
 
@@ -457,10 +469,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             // Surface authentication failures via the LoginRequired event
             // (rendered as a banner) instead of the in-chat error step. The
-            // patterns below are taken from Anthropic's published error
-            // reference at https://code.claude.com/docs/en/errors and are part
-            // of their public contract.
-            if (LooksLikeAuthError(resultText))
+            // assistant message flags them as "authentication_failed"; the
+            // text patterns cover CLI versions that do not send the flag.
+            if (turn.AuthFailed || LooksLikeAuthError(resultText))
             {
                 try { LoginRequired?.Invoke(resultText); }
                 catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] LoginRequired handler threw"); }
@@ -1051,6 +1062,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Phrases pulled verbatim from the documented messages at
         // https://code.claude.com/docs/en/errors (Authentication errors section).
         return t.Contains("please run /login")
+            || t.Contains("failed to authenticate")
             || t.Contains("not logged in")
             || t.Contains("invalid api key")
             || t.Contains("oauth token")
@@ -1072,6 +1084,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         public StringBuilder ResponseBuilder = new StringBuilder();
 
         public OutputItem? ToolItem;
+
+        // Set when the CLI flags an assistant message as "authentication_failed".
+        public bool AuthFailed;
 
         // tool_use ids whose tool_result should be skipped (e.g. AskUserQuestion,
         // which we hide from the UI step list).
