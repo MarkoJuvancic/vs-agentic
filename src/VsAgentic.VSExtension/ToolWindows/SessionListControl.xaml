@@ -110,13 +110,29 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ListBoxItem">
-                        <Border x:Name="border"
-                                CornerRadius="4"
-                                Background="{TemplateBinding Background}"
-                                Padding="{TemplateBinding Padding}">
-                            <ContentPresenter />
-                        </Border>
+                        <StackPanel>
+                            <!-- Ends the pinned group. It sits outside the row
+                                 highlight and takes no mouse input, so it never
+                                 reads as part of the row below. The text color
+                                 at low opacity shows in every theme. -->
+                            <Rectangle x:Name="PinnedSeparator"
+                                       Height="1"
+                                       Margin="6,4,6,5"
+                                       Opacity="0.3"
+                                       Fill="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"
+                                       Visibility="Collapsed"
+                                       IsHitTestVisible="False" />
+                            <Border x:Name="border"
+                                    CornerRadius="4"
+                                    Background="{TemplateBinding Background}"
+                                    Padding="{TemplateBinding Padding}">
+                                <ContentPresenter />
+                            </Border>
+                        </StackPanel>
                         <ControlTemplate.Triggers>
+                            <DataTrigger Binding="{Binding StartsUnpinnedGroup}" Value="True">
+                                <Setter TargetName="PinnedSeparator" Property="Visibility" Value="Visible" />
+                            </DataTrigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="border" Property="Background"
                                         Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}" />
