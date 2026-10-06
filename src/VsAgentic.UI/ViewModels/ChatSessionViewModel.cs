@@ -125,6 +125,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public event Action<string, string>? MessageContentUpdated;
     public event Action<string, OutputItemStatus, string>? MessageStatusUpdated;
     public event Action<string, string, OutputBodyMode>? MessageBodySet;
+    public event Action<string, BackgroundStepState, string?>? MessageBackgroundStateSet;
     public event Action<string>? MessageCompleted;
     public event Action? AllCleared;
     public event Action<IEnumerable<ChatMessageData>>? MessagesRestored;
@@ -181,8 +182,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _questionBroker.QuestionRequested += OnQuestionBrokerRequested;
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+        chatService.StepBackgroundStateChanged += OnChatServiceStepBackgroundStateChanged;
 
         InitializeUsage(chatService, options.Value);
+    }
+
+    // The step id is the id the transcript already knows the step by, so the
+    // mark goes straight to the web view. It is not saved: a reopened session
+    // shows the step without it.
+    private void OnChatServiceStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary)
+    {
+        Dispatch(() => MessageBackgroundStateSet?.Invoke(stepId, state, summary));
     }
 
     private void OnChatServiceLoginRequired(string? errorMessage)
@@ -732,6 +742,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
                 _chatService.ModelChanged -= OnChatServiceModelChanged;
+                _chatService.StepBackgroundStateChanged -= OnChatServiceStepBackgroundStateChanged;
             }
         }
         catch { }
