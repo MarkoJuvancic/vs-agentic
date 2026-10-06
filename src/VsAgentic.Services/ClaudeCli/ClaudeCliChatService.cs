@@ -733,9 +733,19 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             var result = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
             await Task.Run(() => process.WaitForExit(), cancellationToken).ConfigureAwait(false);
 
-            var title = SanitizeTitle(result);
-            if (!string.IsNullOrWhiteSpace(title))
-                return title;
+            // A failed call (sign-in, rate limit, network) prints its error to
+            // stdout and exits non-zero. That text must not become the title.
+            if (process.ExitCode != 0)
+            {
+                _logger.LogWarning("[ClaudeCli] Title generation exited with code {Code}: {Output}, using fallback",
+                    process.ExitCode, result.Trim());
+            }
+            else
+            {
+                var title = SanitizeTitle(result);
+                if (!string.IsNullOrWhiteSpace(title))
+                    return title;
+            }
         }
         catch (Exception ex)
         {
