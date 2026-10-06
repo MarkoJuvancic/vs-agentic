@@ -181,8 +181,49 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _questionBroker.QuestionRequested += OnQuestionBrokerRequested;
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+        chatService.UnsolicitedTurnStarted += OnUnsolicitedTurnStarted;
+        chatService.UnsolicitedTurnCompleted += OnUnsolicitedTurnCompleted;
 
         InitializeUsage(chatService, options.Value);
+    }
+
+    // True while a turn the CLI started on its own is running. It holds the
+    // session busy like a sent message does, so Send stays off and Stop works.
+    private bool _inUnsolicitedTurn;
+
+    private void OnUnsolicitedTurnStarted()
+    {
+        Dispatch(() =>
+        {
+            if (IsBusy) return;
+            _inUnsolicitedTurn = true;
+            IsBusy = true;
+        });
+    }
+
+    private void OnUnsolicitedTurnCompleted()
+    {
+        Dispatch(() =>
+        {
+            if (!_inUnsolicitedTurn) return;
+            _inUnsolicitedTurn = false;
+            IsBusy = false;
+            OnExchangeCompleted();
+            RequestScroll();
+        });
+    }
+
+    private void OnExchangeCompleted()
+    {
+        // Persist conversation history after each completed exchange
+        PersistConversationHistoryFireAndForget();
+
+        // Refresh cost and last activity in the session list
+        if (_chatService is not null && SessionInfo is not null)
+        {
+            SessionInfo.SessionCost = _chatService.GetSessionCost();
+            SessionInfo.LastActivity = DateTime.Now;
+        }
     }
 
     private void OnChatServiceLoginRequired(string? errorMessage)
@@ -439,15 +480,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 // Output is handled by listener callbacks
             }
 
-            // Persist conversation history after each completed exchange
-            PersistConversationHistoryFireAndForget();
-
-            // Refresh cost and last activity in the session list
-            if (_chatService is not null && SessionInfo is not null)
-            {
-                SessionInfo.SessionCost = _chatService.GetSessionCost();
-                SessionInfo.LastActivity = DateTime.Now;
-            }
+            OnExchangeCompleted();
         }
         catch (OperationCanceledException)
         {
@@ -499,6 +532,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     {
         try { _sendCts?.Cancel(); }
         catch { /* best effort — token may already be disposed */ }
+
+        if (_inUnsolicitedTurn)
+        {
+            try { _chatService?.StopUnsolicitedTurn(); }
+            catch (Exception ex) { _logger.LogError(ex, "[VM] Stop: StopUnsolicitedTurn failed"); }
+        }
 
         // The dispatcher loop blocks on the broker's TCS while a permission /
         // question banner is open. SendAsync's cancellation token doesn't reach
@@ -732,6 +771,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
                 _chatService.ModelChanged -= OnChatServiceModelChanged;
+                _chatService.UnsolicitedTurnStarted -= OnUnsolicitedTurnStarted;
+                _chatService.UnsolicitedTurnCompleted -= OnUnsolicitedTurnCompleted;
             }
         }
         catch { }

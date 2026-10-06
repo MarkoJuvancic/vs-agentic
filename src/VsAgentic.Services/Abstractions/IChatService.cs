@@ -84,4 +84,26 @@ public interface IChatService
     /// new credentials.
     /// </summary>
     void LaunchLogin();
+
+    /// <summary>
+    /// Raised when the CLI starts a turn without a <see cref="SendMessageAsync"/>
+    /// call, for example when a background command finishes and wakes the
+    /// model. The turn's output arrives through the output listener as usual.
+    /// Raised on a background thread; hosts must marshal to the UI thread.
+    /// </summary>
+    event Action? UnsolicitedTurnStarted;
+
+    /// <summary>
+    /// Raised when a turn announced by <see cref="UnsolicitedTurnStarted"/>
+    /// ends, is stopped, or is cut off by the process exiting. Raised on a
+    /// background thread.
+    /// </summary>
+    event Action? UnsolicitedTurnCompleted;
+
+    /// <summary>
+    /// Stops showing the turn the CLI started on its own. Like stopping a
+    /// <see cref="SendMessageAsync"/> call, the CLI itself is not interrupted;
+    /// the rest of the turn is dropped. A no-op when no such turn is running.
+    /// </summary>
+    void StopUnsolicitedTurn();
 }
