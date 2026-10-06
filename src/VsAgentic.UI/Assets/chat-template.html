@@ -224,6 +224,20 @@ html, body {
 .toolstep-bg-Stopped { color: var(--text-muted); }
 @keyframes bg-pulse { 50% { opacity: 0.45; } }
 
+/* Notice: a one-line event from the extension, e.g. a background command that
+   ended. Indented like a step, in muted text, with a colored outcome icon. */
+.msg-notice {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.notice-icon { font-weight: bold; }
+.notice-Success .notice-icon { color: var(--success); }
+.notice-Error .notice-icon { color: var(--error); }
+.notice-Info .notice-icon { color: var(--text-muted); }
+
 .toolstep-expander {
     margin: 4px 0 0 18px;
     font-size: 11px;
@@ -682,6 +696,17 @@ function addMessage(id, type, dataJson) {
         body.style.display = 'none';
         div.appendChild(body);
     }
+    else if (type === 'Notice') {
+        div.classList.add('msg-notice', 'notice-' + (data.Status || 'Info'));
+        var icon = document.createElement('span');
+        icon.className = 'notice-icon';
+        icon.textContent = NOTICE_ICONS[data.Status] || NOTICE_ICONS.Info;
+        var text = document.createElement('span');
+        text.className = 'notice-text';
+        text.textContent = data.Content || '';
+        div.appendChild(icon);
+        div.appendChild(text);
+    }
     else if (type === 'Thinking') {
         div.classList.add('msg-thinking');
         var header = document.createElement('div');
@@ -794,6 +819,8 @@ function updateStatus(id, status, expanderTitle) {
         if (et) et.textContent = expanderTitle;
     }
 }
+
+var NOTICE_ICONS = { Success: '✓', Error: '✗', Info: '■' };
 
 var BG_LABELS = {
     Running: '⧗ running in background',
@@ -979,6 +1006,9 @@ function getMessageText(msgEl) {
     } else if (type === 'Thinking') {
         var tc = msgEl.querySelector('.thinking-content');
         return tc ? tc.textContent : '';
+    } else if (type === 'Notice') {
+        var nt = msgEl.querySelector('.notice-text');
+        return nt ? nt.textContent : '';
     }
     return '';
 }
