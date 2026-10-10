@@ -101,11 +101,9 @@
                 </Setter.Value>
             </Setter>
             <Style.Triggers>
-                <!-- Both pickers restart the CLI process, so a change while a
-                     turn is running would kill the reply in flight. -->
-                <DataTrigger Binding="{Binding IsBusy}" Value="True">
-                    <Setter Property="IsEnabled" Value="False"/>
-                </DataTrigger>
+                <!-- Both pickers stay enabled while a turn is running. The
+                     change goes to the running CLI and applies from its next
+                     request, so it no longer kills the reply in flight. -->
                 <Trigger Property="IsEnabled" Value="False">
                     <Setter Property="Opacity" Value="0.5"/>
                     <Setter Property="Cursor" Value="Arrow"/>
@@ -451,8 +449,10 @@
                                                           Level="{Binding ContextLevel}"
                                                           ToolTip="{Binding ContextTooltip}"/>
 
-                                        <!-- Changing either picker restarts the CLI
-                                             process on the next message; the
+                                        <!-- Changing either picker goes to the running
+                                             CLI process, which applies it from its next
+                                             API request. An older CLI that cannot take
+                                             it restarts before the next message; the
                                              conversation is resumed, not lost.
 
                                              An ItemTemplate, not DisplayMemberPath:
@@ -466,7 +466,7 @@
                                                   ItemContainerStyle="{StaticResource StatusComboItemStyle}"
                                                   ItemsSource="{Binding ModelOptions}"
                                                   SelectedItem="{Binding SelectedModel}"
-                                                  ToolTip="{Binding ModelDisplay, StringFormat='Model: {0}&#x0a;Takes effect on the next message.'}"
+                                                  ToolTip="{Binding ModelDisplay, StringFormat='Model: {0}&#x0a;Takes effect on the next request, also during a reply.'}"
                                                   Visibility="{Binding ActualWidth, ElementName=StatusInfo,
                                                                Converter={StaticResource MinWidth},
                                                                ConverterParameter=405}">
@@ -481,7 +481,7 @@
                                                   ItemContainerStyle="{StaticResource StatusComboItemStyle}"
                                                   ItemsSource="{Binding EffortOptions}"
                                                   SelectedItem="{Binding SelectedEffort}"
-                                                  ToolTip="Reasoning effort. Default sends no level to the CLI.&#x0a;Takes effect on the next message."
+                                                  ToolTip="Reasoning effort. Default sends no level to the CLI.&#x0a;Takes effect on the next request, also during a reply."
                                                   Visibility="{Binding ActualWidth, ElementName=StatusInfo,
                                                                Converter={StaticResource MinWidth},
                                                                ConverterParameter=480}"/>

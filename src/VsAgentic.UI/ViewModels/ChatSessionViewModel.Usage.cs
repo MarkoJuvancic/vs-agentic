@@ -71,7 +71,7 @@ public partial class ChatSessionViewModel
 
     /// <summary>
     /// Set while seeding the pickers from saved settings, so restoring a value
-    /// does not look like the user picking it and needlessly restart the CLI.
+    /// does not look like the user picking it and needlessly reach the CLI.
     /// </summary>
     private bool _suppressModelEffortApply;
 

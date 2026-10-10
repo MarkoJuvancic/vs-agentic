@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -59,5 +61,42 @@ internal static class StreamJsonProtocol
             }
         };
         return JsonSerializer.Serialize(msg, SerializerOptions);
+    }
+
+    /// <summary>
+    /// Build the control request that changes the model and/or effort of the
+    /// running process. A setting is sent only when its <c>include</c> flag is
+    /// set; a null value then returns it to the CLI default.
+    ///
+    /// Written by hand rather than through <see cref="SerializerOptions"/>,
+    /// because that drops null values and the null is the message here.
+    /// </summary>
+    public static string BuildApplyFlagSettings(
+        string requestId,
+        bool includeModel, string? model,
+        bool includeEffort, string? effort)
+    {
+        using var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteString("type", "control_request");
+            w.WriteString("request_id", requestId);
+            w.WriteStartObject("request");
+            w.WriteString("subtype", "apply_flag_settings");
+            w.WriteStartObject("settings");
+            if (includeModel) WriteStringOrNull(w, "model", model);
+            if (includeEffort) WriteStringOrNull(w, "effortLevel", effort);
+            w.WriteEndObject();
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static void WriteStringOrNull(Utf8JsonWriter w, string name, string? value)
+    {
+        if (value is null) w.WriteNull(name);
+        else w.WriteString(name, value);
     }
 }

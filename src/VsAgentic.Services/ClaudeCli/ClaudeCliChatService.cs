@@ -75,6 +75,19 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private TurnState? _activeTurn;
     private readonly object _activeTurnLock = new object();
 
+    // ── Control requests ──────────────────────────────────────────────────
+    // A model or effort change goes to the running process as a control
+    // request. The dispatcher completes the matching entry when the CLI
+    // answers; the result is the error text, or null on success.
+    private readonly Dictionary<string, TaskCompletionSource<string?>> _pendingControl =
+        new Dictionary<string, TaskCompletionSource<string?>>(StringComparer.Ordinal);
+    private int _controlRequestSeq;
+    private static readonly TimeSpan ControlRequestTimeout = TimeSpan.FromSeconds(10);
+
+    // Set when the running process could not take a change. The next message
+    // then restarts it, so the change still lands — but never mid-turn.
+    private volatile bool _restartBeforeNextMessage;
+
     public ClaudeCliChatService(
         IOptions<VsAgenticOptions> options,
         IOutputListener outputListener,
@@ -112,6 +125,14 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Lazy start: bring the long-running process up if it's not running.
         try
         {
+            if (_restartBeforeNextMessage)
+            {
+                _restartBeforeNextMessage = false;
+                _host.Stop();
+                lock (_dispatcherLock) { _dispatcherTask = null; }
+                _logger.LogInformation("[ClaudeCli] Restarting CLI to apply a model/effort change");
+            }
+
             _host.SetResumeSessionId(_cliSessionId);
             await _host.EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
             EnsureDispatcherStarted();
@@ -248,7 +269,32 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             case "result":
                 HandleResultEvent(evt);
                 return;
+
+            case "control_response":
+                HandleControlResponse(evt);
+                return;
         }
+    }
+
+    private void HandleControlResponse(JsonElement evt)
+    {
+        if (!evt.TryGetProperty("response", out var response)) return;
+        var requestId = response.TryGetProperty("request_id", out var id) ? id.GetString() : null;
+        if (requestId is null) return;
+
+        TaskCompletionSource<string?>? pending;
+        lock (_pendingControl)
+        {
+            if (!_pendingControl.TryGetValue(requestId, out pending)) return;
+            _pendingControl.Remove(requestId);
+        }
+
+        var ok = response.TryGetProperty("subtype", out var st) && st.GetString() == "success";
+        var error = ok ? null
+            : response.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String
+                ? e.GetString() ?? "error"
+                : "error";
+        pending.TrySetResult(error);
     }
 
     private void HandleSystemEvent(JsonElement evt)
@@ -918,36 +964,91 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     {
         var alias = (modelAlias ?? "").Trim();
         var modelChanged = !string.Equals(_options.Model, alias, StringComparison.OrdinalIgnoreCase);
-        if (!modelChanged && _options.Effort == effort)
+        var effortChanged = _options.Effort != effort;
+        if (!modelChanged && !effortChanged)
         {
             return;
         }
 
+        // The options feed the start-up flags, so a process started later picks
+        // up the change on its own. Only a running process needs to be told.
         _options.Model = alias;
         _options.Effort = effort;
 
-        // Both are start-up flags, so the running process cannot pick them up.
-        // Killing it here leaves _cliSessionId intact, which means the next
-        // SendMessageAsync starts a fresh process with --resume and the
-        // conversation carries on where it left off.
-        try
+        if (_host.IsRunning)
         {
-            _host.Stop();
-            lock (_dispatcherLock) { _dispatcherTask = null; }
-            _logger.LogInformation(
-                "[ClaudeCli] Model/effort set to '{Model}'/'{Effort}'; process restarts on next message",
-                alias.Length == 0 ? "(cli default)" : alias, effort);
+            _ = ApplyToRunningProcessAsync(
+                modelChanged, alias.Length == 0 ? null : alias,
+                effortChanged, effort == ClaudeEffort.Default ? null : effort.ToCliValue());
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogError(ex, "[ClaudeCli] Failed to stop CLI after a model/effort change");
+            _logger.LogInformation(
+                "[ClaudeCli] Model/effort set to '{Model}'/'{Effort}'; applies when the CLI starts",
+                alias.Length == 0 ? "(cli default)" : alias, effort);
         }
 
         // The model reported so far no longer describes what the next turn runs
-        // on. Clearing it lets the host fall back to its preview until the new
-        // process reports the real one.
+        // on. Clearing it lets the host fall back to its preview until the next
+        // init event reports the real one. The CLI sends init on every turn.
         if (modelChanged)
             SetCurrentModel(null);
+    }
+
+    /// <summary>
+    /// Sends a model/effort change to the running CLI as an
+    /// <c>apply_flag_settings</c> control request. The CLI applies it from its
+    /// next API request on, which within a turn means the next step.
+    ///
+    /// A null value returns the setting to the CLI default — the Default entry
+    /// in either picker. Only changed settings are sent, so an effort change
+    /// does not count as a model switch on the CLI side.
+    ///
+    /// The CLI answers success even for a value it ignores, so a success only
+    /// means the request was understood. An error or no answer means a CLI that
+    /// does not know the request; the change then waits for a restart before the
+    /// next message, which is the old behavior without the mid-turn kill.
+    /// </summary>
+    private async Task ApplyToRunningProcessAsync(
+        bool includeModel, string? model, bool includeEffort, string? effort)
+    {
+        var requestId = "vsagentic-" + Interlocked.Increment(ref _controlRequestSeq);
+        var pending = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_pendingControl) { _pendingControl[requestId] = pending; }
+
+        string? error;
+        try
+        {
+            EnsureDispatcherStarted();
+            var line = StreamJsonProtocol.BuildApplyFlagSettings(
+                requestId, includeModel, model, includeEffort, effort);
+            await _host.WriteLineAsync(line, CancellationToken.None).ConfigureAwait(false);
+
+            var done = await Task.WhenAny(pending.Task, Task.Delay(ControlRequestTimeout)).ConfigureAwait(false);
+            error = done == pending.Task ? pending.Task.Result : "no response";
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            lock (_pendingControl) { _pendingControl.Remove(requestId); }
+        }
+
+        if (error is null)
+        {
+            _logger.LogInformation(
+                "[ClaudeCli] Model/effort applied to the running CLI: model {Model}, effort {Effort}",
+                includeModel ? model ?? "(cli default)" : "(unchanged)",
+                includeEffort ? effort ?? "(cli default)" : "(unchanged)");
+            return;
+        }
+
+        _restartBeforeNextMessage = true;
+        _logger.LogWarning(
+            "[ClaudeCli] CLI did not take the model/effort change ({Error}); restarting before the next message",
+            error);
     }
 
     public void ClearHistory()

@@ -62,10 +62,11 @@ public interface IChatService
     /// <summary>
     /// Switches the model and/or reasoning effort for this session.
     ///
-    /// Both are start-up flags on the CLI, so the running process is torn down
-    /// here and the next <see cref="SendMessageAsync"/> starts a fresh one that
-    /// resumes the same conversation. Nothing is lost, but the next message
-    /// pays the process-start cost. A no-op when neither value changed.
+    /// A running process takes the change at once and applies it from its next
+    /// API request, also within a running turn. A process started later gets
+    /// it as start-up flags. If the running process cannot take it, the next
+    /// <see cref="SendMessageAsync"/> restarts the process and resumes the same
+    /// conversation. A no-op when neither value changed.
     /// </summary>
     void ApplyModelAndEffort(string modelAlias, ClaudeEffort effort);
 
