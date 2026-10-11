@@ -170,18 +170,75 @@
         </Style>
 
         <!-- WPF menus don't pick up the VS theme on their own, so the shell
-             brushes are applied by hand. -->
+             brushes are applied by hand. Setting the brushes is not enough:
+             the stock template paints a hardcoded #F1F1F1 icon gutter behind
+             the whole menu, which reads as a white block in a dark theme, so
+             the template is replaced outright. -->
         <Style x:Key="SessionMenuStyle" TargetType="ContextMenu">
             <Setter Property="Background" Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMenuBackgroundGradientKey}}" />
             <Setter Property="Foreground" Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarTextActiveKey}}" />
             <Setter Property="BorderBrush" Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMenuBorderKey}}" />
             <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="2" />
+            <!-- The menu opens in its own popup and so inherits nothing from
+                 the tool window. CrispImage needs the colour behind it to
+                 decide whether to invert an icon for a dark theme. -->
+            <Setter Property="platformui:ImageThemingUtilities.ImageBackgroundColor"
+                    Value="{DynamicResource {x:Static vs:VsColors.CommandBarMenuBackgroundGradientBeginKey}}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ContextMenu">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
+        <!-- Same reason as above: the stock item template hides the styled
+             hover behind its own hardcoded blue, so it is replaced too. -->
         <Style x:Key="SessionMenuItemStyle" TargetType="MenuItem">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarTextActiveKey}}" />
             <Setter Property="Padding" Value="6,4" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Border x:Name="border"
+                                Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="16" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <ContentPresenter ContentSource="Icon"
+                                                  Width="16" Height="16"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center" />
+                                <ContentPresenter Grid.Column="1"
+                                                  ContentSource="Header"
+                                                  RecognizesAccessKey="True"
+                                                  Margin="8,0,0,0"
+                                                  VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
             <Style.Triggers>
                 <Trigger Property="IsHighlighted" Value="True">
                     <Setter Property="Background" Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}" />
