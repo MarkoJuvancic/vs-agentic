@@ -388,7 +388,8 @@ html, body {
     /* Room for the button so it never sits on top of the first code line. */
     padding-right: 36px;
 }
-.code-copy-btn {
+.code-copy-btn,
+.quote-copy-btn {
     position: absolute;
     top: 6px;
     right: 6px;
@@ -409,11 +410,13 @@ html, body {
     line-height: 1;
 }
 .code-block:hover .code-copy-btn { opacity: 1; }
-.code-copy-btn:hover {
+.code-copy-btn:hover,
+.quote-copy-btn:hover {
     color: var(--text-primary);
     background: var(--bg-input);
 }
-.code-copy-btn.copied {
+.code-copy-btn.copied,
+.quote-copy-btn.copied {
     color: var(--success);
     opacity: 1;
 }
@@ -423,6 +426,16 @@ html, body {
     padding: 0.2em 0 0.2em 12px;
     color: #9e9e9e;
 }
+/* Copy button on block quotes. A quote is how a prompt to run is written, and
+   the message-level button would take the whole answer around it. */
+.quote-block {
+    position: relative;
+}
+.quote-block > blockquote {
+    /* Room for the button so it never sits on top of the quoted text. */
+    padding-right: 36px;
+}
+.quote-block:hover .quote-copy-btn { opacity: 1; }
 .md-content ul, .md-content ol { margin: 0.4em 0; padding-left: 1.6em; }
 .md-content li { margin: 0.15em 0; }
 .md-content table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
@@ -545,6 +558,19 @@ function renderUserMd(text) {
     return userConverter.makeHtml(text);
 }
 
+// Keep the markdown a block was rendered from, so the copy button can hand
+// back the source instead of the rendered text. Reading the DOM loses the
+// syntax: a table arrives as bare cells with no pipes, and fenced code
+// arrives with no fences.
+function keepMarkdownSource(el, markdown) {
+    if (markdown) el.dataset.md = markdown;
+    else delete el.dataset.md;
+}
+
+function markdownSourceOf(el) {
+    return el.dataset.md !== undefined ? el.dataset.md : el.innerText;
+}
+
 function isNearBottom() {
     if (!_container) return true;
     return _container.scrollHeight - _container.scrollTop - _container.clientHeight < 50;
@@ -636,8 +662,9 @@ function addMessage(id, type, dataJson) {
         var content = document.createElement('div');
         content.className = 'md-content msg-content';
         content.innerHTML = renderUserMd(data.Content || '');
+        keepMarkdownSource(content, data.Content || '');
         linkifyFilePaths(content);
-        addCodeCopyButtons(content);
+        addBlockCopyButtons(content);
         div.appendChild(content);
     }
     else if (type === 'Assistant') {
@@ -651,8 +678,9 @@ function addMessage(id, type, dataJson) {
         content.className = 'md-content msg-content';
         if (data.IsStreaming) content.classList.add('streaming-cursor');
         content.innerHTML = renderMd(data.Content || '');
+        keepMarkdownSource(content, data.Content || '');
         linkifyFilePaths(content);
-        addCodeCopyButtons(content);
+        addBlockCopyButtons(content);
         inner.appendChild(bullet);
         inner.appendChild(content);
         div.appendChild(inner);
@@ -798,8 +826,9 @@ function updateContent(id, contentMarkdown) {
             var mc = el.querySelector('.msg-content');
             if (mc) {
                 mc.innerHTML = type === 'User' ? renderUserMd(contentMarkdown) : renderMd(contentMarkdown);
+                keepMarkdownSource(mc, contentMarkdown);
                 linkifyFilePaths(mc);
-                addCodeCopyButtons(mc);
+                addBlockCopyButtons(mc);
             }
         } else if (type === 'ToolStep' || type === 'Thinking') {
             var sc = el.querySelector('.msg-streaming-content');
@@ -832,11 +861,14 @@ function setBody(id, bodyContent, bodyMode) {
 
     if (bodyMode === 'Html') {
         body.innerHTML = bodyContent;
+        // The host built this HTML itself, so there is no markdown to keep.
+        keepMarkdownSource(body, '');
     } else {
         body.innerHTML = renderMd(bodyContent);
+        keepMarkdownSource(body, bodyContent);
     }
     linkifyFilePaths(body);
-    addCodeCopyButtons(body);
+    addBlockCopyButtons(body);
     body.style.display = '';
 
     // Apply cap and show-more link
@@ -969,14 +1001,14 @@ function getMessageText(msgEl) {
     var type = msgEl.dataset.type;
     if (type === 'User' || type === 'Assistant') {
         var mc = msgEl.querySelector('.msg-content');
-        return mc ? mc.innerText : '';
+        return mc ? markdownSourceOf(mc) : '';
     } else if (type === 'ToolStep') {
         var name = msgEl.querySelector('.toolstep-name');
         var body = msgEl.querySelector('.msg-body');
         var streaming = msgEl.querySelector('.msg-streaming-content');
         var parts = [];
         if (name) parts.push(name.textContent);
-        if (body && body.style.display !== 'none') parts.push(body.innerText);
+        if (body && body.style.display !== 'none') parts.push(markdownSourceOf(body));
         else if (streaming) parts.push(streaming.textContent);
         return parts.join('\n');
     } else if (type === 'Thinking') {
@@ -1007,45 +1039,67 @@ function flashCopied(btn) {
     }, 1500);
 }
 
-// Give every fenced code block its own copy button, so a prompt or snippet
-// can be taken without selecting it by hand.
-function addCodeCopyButtons(container) {
+// Wrap a block in a positioned container and pin a copy button to its corner.
+// The wrapper is what keeps the button in place when the block scrolls.
+function wrapWithCopyButton(el, wrapClass, btnClass, title, getText) {
+    var wrap = document.createElement('div');
+    wrap.className = wrapClass;
+    el.parentNode.insertBefore(wrap, el);
+    wrap.appendChild(el);
+
+    var btn = document.createElement('button');
+    btn.className = btnClass;
+    btn.title = title;
+    btn.innerHTML = ICON_COPY;
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var text = getText(el);
+        if (!text) return;
+        copyToClipboard(text.replace(/\n$/, ''));
+        flashCopied(btn);
+    });
+    wrap.appendChild(btn);
+
+    // A block at the very top of a message would sit under the message-level
+    // copy button; yield to the block's own button while hovering.
+    wrap.addEventListener('mouseenter', function() {
+        var msg = this.closest('.msg');
+        if (msg) msg.classList.add('code-hover');
+    });
+    wrap.addEventListener('mouseleave', function() {
+        var msg = this.closest('.msg');
+        // Leaving a quote nested in another one is not leaving the outer
+        // block, so only give the message-level button back when no block in
+        // this message is under the pointer any more.
+        if (msg && !msg.querySelector('.code-block:hover, .quote-block:hover')) {
+            msg.classList.remove('code-hover');
+        }
+    });
+}
+
+// Give every fenced code block and every block quote its own copy button, so a
+// prompt or snippet can be taken without selecting it by hand.
+function addBlockCopyButtons(container) {
     var pres = container.querySelectorAll('pre');
     for (var i = 0; i < pres.length; i++) {
         var pre = pres[i];
         if (pre.parentNode && pre.parentNode.classList.contains('code-block')) continue;
 
-        var wrap = document.createElement('div');
-        wrap.className = 'code-block';
-        pre.parentNode.insertBefore(wrap, pre);
-        wrap.appendChild(pre);
-
-        var btn = document.createElement('button');
-        btn.className = 'code-copy-btn';
-        btn.title = 'Copy code to clipboard';
-        btn.innerHTML = ICON_COPY;
-        // Bind per-iteration so the handler copies its own block.
-        btn.addEventListener('click', (function(target, button) {
-            return function(e) {
-                e.stopPropagation();
-                var code = target.querySelector('code');
-                var text = (code || target).innerText;
-                if (!text) return;
-                copyToClipboard(text.replace(/\n$/, ''));
-                flashCopied(button);
-            };
-        })(pre, btn));
-        wrap.appendChild(btn);
-
-        // A code block at the very top of a message would sit under the
-        // message-level copy button; yield to the code button while hovering.
-        wrap.addEventListener('mouseenter', function() {
-            var msg = this.closest('.msg');
-            if (msg) msg.classList.add('code-hover');
+        wrapWithCopyButton(pre, 'code-block', 'code-copy-btn', 'Copy code to clipboard', function(target) {
+            var code = target.querySelector('code');
+            return (code || target).innerText;
         });
-        wrap.addEventListener('mouseleave', function() {
-            var msg = this.closest('.msg');
-            if (msg) msg.classList.remove('code-hover');
+    }
+
+    var quotes = container.querySelectorAll('blockquote');
+    for (var j = 0; j < quotes.length; j++) {
+        var quote = quotes[j];
+        if (quote.parentNode && quote.parentNode.classList.contains('quote-block')) continue;
+
+        // A quote inside another gets its own button as well: the inner quote
+        // is usually the line you want, and the outer one still copies both.
+        wrapWithCopyButton(quote, 'quote-block', 'quote-copy-btn', 'Copy quote to clipboard', function(target) {
+            return target.innerText;
         });
     }
 }
@@ -1117,24 +1171,28 @@ function showCtxMenu(e, items) {
 
 document.addEventListener('contextmenu', function(e) {
     if (_ctxMenu) _ctxMenu.style.display = 'none';
+
+    // Both can apply at once: a link inside selected text. The file actions come
+    // first, because the link is what was clicked, but Copy has to stay on the
+    // menu or selecting a paragraph that mentions a file leaves no way to copy it.
+    var items = [];
+
     var link = e.target.closest('a.file-link');
     var path = link && link.dataset.path;
     if (path) {
-        e.preventDefault();
-        showCtxMenu(e, [
-            { label: 'Open', run: function() { requestFileLink('open', path); } },
-            { label: 'Copy path', run: function() { requestFileLink('copyPath', path); } },
-            { label: 'Show in Explorer', run: function() { requestFileLink('showInExplorer', path); } }
-        ]);
-        return;
+        items.push({ label: 'Open', run: function() { requestFileLink('open', path); } });
+        items.push({ label: 'Copy path', run: function() { requestFileLink('copyPath', path); } });
+        items.push({ label: 'Show in Explorer', run: function() { requestFileLink('showInExplorer', path); } });
     }
 
     var sel = window.getSelection().toString();
     if (sel) {
+        items.push({ label: 'Copy', run: function() { copyToClipboard(sel); } });
+    }
+
+    if (items.length) {
         e.preventDefault();
-        showCtxMenu(e, [
-            { label: 'Copy', run: function() { copyToClipboard(sel); } }
-        ]);
+        showCtxMenu(e, items);
     }
 });
 
