@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
+using VsAgentic.Services.Abstractions;
 using VsAgentic.UI.Controls;
 using VsAgentic.UI.ViewModels;
 
@@ -224,6 +225,15 @@ public partial class ChatSessionControl : UserControl
 
     private static string ToCssHex(System.Drawing.Color color) =>
         $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+
+    private void RemoveAttachment_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is ChatSessionViewModel vm &&
+            sender is FrameworkElement { DataContext: ChatImageAttachment image })
+        {
+            vm.RemovePendingImage(image);
+        }
+    }
 
     // ------------------------------------------------------------------
     // Zoom
@@ -500,8 +510,45 @@ public partial class ChatSessionControl : UserControl
         return false;
     }
 
+    /// <summary>
+    /// True when the clipboard carries plain text. The clipboard is shared, and
+    /// another process holding it open makes this throw; that case is read as
+    /// "no text", which leaves the paste path exactly as it was before.
+    /// </summary>
+    private static bool ClipboardHasText()
+    {
+        try { return Clipboard.ContainsText(); }
+        catch { return false; }
+    }
+
     private void InputTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // Ctrl+V is caught here rather than through DataObject.Pasting. A
+        // screenshot sits on the clipboard as a bitmap with no text format, so
+        // TextBoxBase.CanPaste is false, the paste command never runs, and the
+        // Pasting event never fires — the keystroke would be swallowed silently.
+        //
+        // Text on the clipboard comes first. Excel, Word and some browsers
+        // publish a bitmap of the selection next to the text they copy, so
+        // reading the image first would attach a picture of the spreadsheet
+        // cells the user meant to paste as text. An image copied in Explorer or
+        // out of an image editor carries no text format, so it still attaches.
+        if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+            && !ClipboardHasText())
+        {
+            if (DataContext is ChatSessionViewModel vm)
+            {
+                var image = ClipboardImage.TryRead();
+                if (image is not null)
+                {
+                    vm.AttachImage(image);
+                    // Otherwise a copied image file would also paste its path.
+                    e.Handled = true;
+                    return;
+                }
+            }
+        }
+
         if (!MentionPopup.IsOpen) return;
 
         switch (e.Key)
