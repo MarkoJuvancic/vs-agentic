@@ -52,19 +52,30 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     // for the session list entry so the sidebar doesn't flicker.
     private static readonly string SpinnerFrames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
     private const string AwaitingPrefix = "? ";
-    private int _pendingUserPrompts;
     private int _spinnerFrame;
     private System.Windows.Threading.DispatcherTimer? _activityTimer;
 
     [ObservableProperty]
     private string _displayTitle = "New Session";
 
+    /// <summary>
+    /// The user is being waited on exactly while a banner is on screen. Read
+    /// from the banner rather than counted: a counter has to be decremented on
+    /// every path that takes a banner down — answered, cancelled by Stop, the
+    /// handler throwing, one banner replacing another — and a single missed
+    /// decrement leaves the session claiming it waits for an answer the user
+    /// has already given.
+    /// </summary>
+    private bool IsAwaitingUser => ActiveBanner is not null;
+
     public SessionActivity Activity =>
-        _pendingUserPrompts > 0 ? SessionActivity.AwaitingUser :
+        IsAwaitingUser ? SessionActivity.AwaitingUser :
         IsBusy ? SessionActivity.Busy :
         SessionActivity.Idle;
 
     partial void OnIsBusyChanged(bool value) => UpdateActivityIndicator();
+
+    partial void OnActiveBannerChanged(IBannerViewModel? value) => UpdateActivityIndicator();
 
     partial void OnSessionTitleChanged(string value) => UpdateDisplayTitle();
 
@@ -187,8 +198,38 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         }
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+        chatService.BackgroundTasksChanged += OnChatServiceBackgroundTasksChanged;
 
         InitializeUsage(chatService, options.Value);
+    }
+
+    // ── Background tasks ──────────────────────────────────────────────────
+    // Commands the CLI runs with run_in_background. They outlive the turn that
+    // started them, so the strip above the input box is the only place that
+    // shows they are still running.
+
+    [ObservableProperty]
+    private bool _hasBackgroundTasks;
+
+    [ObservableProperty]
+    private string _backgroundTasksText = "";
+
+    [ObservableProperty]
+    private string _backgroundTasksTooltip = "";
+
+    private void OnChatServiceBackgroundTasksChanged(IReadOnlyList<BackgroundTask> tasks)
+    {
+        Dispatch(() =>
+        {
+            HasBackgroundTasks = tasks.Count > 0;
+            BackgroundTasksText = tasks.Count switch
+            {
+                0 => "",
+                1 => "Running in background: " + tasks[0].Description,
+                _ => $"{tasks.Count} tasks running in background",
+            };
+            BackgroundTasksTooltip = string.Join("\n", tasks.Select(t => "• " + t.Description));
+        });
     }
 
     private void OnChatServiceLoginRequired(string? errorMessage)
@@ -209,19 +250,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             try
             {
-                _pendingUserPrompts++;
-                UpdateActivityIndicator();
                 _logger.LogInformation(
                     "[VM] Permission prompt requested (id={Id}, tool={Tool})",
                     request.Id, request.ToolName);
                 ActiveBanner = new PermissionBannerViewModel(request, decision =>
                 {
-                    Dispatch(() =>
-                    {
-                        ActiveBanner = null;
-                        if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                        UpdateActivityIndicator();
-                    });
+                    Dispatch(() => ActiveBanner = null);
                     _permissionBroker?.Resolve(request.Id, decision);
                 });
             }
@@ -230,8 +264,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 // Without this guard the throw escapes Dispatcher.BeginInvoke,
                 // tears down the dispatcher loop, and leaves the chat hung.
                 _logger.LogError(ex, "[VM] Permission prompt handler crashed (id={Id})", request.Id);
-                if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                UpdateActivityIndicator();
+                ActiveBanner = null;
                 try { _permissionBroker?.Resolve(request.Id, PermissionDecision.Deny("Banner failed to display")); }
                 catch (Exception ex2) { _logger.LogError(ex2, "[VM] PermissionBroker.Resolve also failed"); }
             }
@@ -244,27 +277,19 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             try
             {
-                _pendingUserPrompts++;
-                UpdateActivityIndicator();
                 _logger.LogInformation(
                     "[VM] User question requested (toolUseId={Id}, questions={Count})",
                     request.ToolUseId, request.Questions.Count);
                 ActiveBanner = new QuestionCardViewModel(request, answers =>
                 {
-                    Dispatch(() =>
-                    {
-                        ActiveBanner = null;
-                        if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                        UpdateActivityIndicator();
-                    });
+                    Dispatch(() => ActiveBanner = null);
                     _questionBroker?.Resolve(request.ToolUseId, answers);
                 });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[VM] User question handler crashed (toolUseId={Id})", request.ToolUseId);
-                if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                UpdateActivityIndicator();
+                ActiveBanner = null;
                 try { _questionBroker?.Resolve(request.ToolUseId, new Dictionary<string, string>()); }
                 catch (Exception ex2) { _logger.LogError(ex2, "[VM] QuestionBroker.Resolve also failed"); }
             }
@@ -306,7 +331,6 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     private void DismissActiveBanner(string notice)
     {
         ActiveBanner = null;
-        if (_pendingUserPrompts > 0) _pendingUserPrompts--;
         UpdateActivityIndicator();
 
         var noticeId = $"dismissed-{++_userMsgCounter}";
@@ -795,6 +819,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
                 _chatService.ModelChanged -= OnChatServiceModelChanged;
+                _chatService.BackgroundTasksChanged -= OnChatServiceBackgroundTasksChanged;
             }
         }
         catch { }
