@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace VsAgentic.Services.Abstractions;
 
 /// <summary>
@@ -5,7 +7,7 @@ namespace VsAgentic.Services.Abstractions;
 /// base64 content blocks over stream-json stdin, so nothing has to be written
 /// to the project first.
 /// </summary>
-public sealed class ChatImageAttachment
+public sealed class ChatImageAttachment : IChatAttachment
 {
     /// <summary>Raw encoded bytes, already in <see cref="MediaType"/> format.</summary>
     public byte[] Data { get; }
@@ -19,12 +21,30 @@ public sealed class ChatImageAttachment
     /// </summary>
     public string FileName { get; set; } = "";
 
-    public ChatImageAttachment(byte[] data, string mediaType)
+    /// <summary>
+    /// Set when the image was copied as a file rather than as a bitmap. The
+    /// bytes still travel inline; the path is what lets the message name the
+    /// image, so a paste of several is not a row of anonymous thumbnails.
+    /// </summary>
+    public string? SourcePath { get; }
+
+    /// <summary>
+    /// Chips carry a thumbnail rather than a name, so this is only ever read as
+    /// a tooltip or by accessibility tools. The name on disk beats the one the
+    /// store assigns, which is a GUID.
+    /// </summary>
+    public string DisplayName =>
+        SourcePath is not null ? Path.GetFileName(SourcePath)
+        : string.IsNullOrEmpty(FileName) ? "Pasted image"
+        : FileName;
+
+    public ChatImageAttachment(byte[] data, string mediaType, string? sourcePath = null)
     {
         Data = data ?? throw new ArgumentNullException(nameof(data));
         MediaType = string.IsNullOrWhiteSpace(mediaType)
             ? throw new ArgumentException("Media type is required.", nameof(mediaType))
             : mediaType;
+        SourcePath = sourcePath;
     }
 
     /// <summary>Media types the Claude API accepts for image blocks.</summary>
