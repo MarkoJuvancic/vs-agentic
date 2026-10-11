@@ -59,6 +59,28 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     private string _displayTitle = "New Session";
 
     /// <summary>
+    /// What the AI is doing right now, shown in the bar under the chat: the
+    /// step in flight and how long the turn has been running. A long task
+    /// reports itself here rather than by filling the transcript.
+    /// </summary>
+    [ObservableProperty]
+    private string _busyStatus = "Thinking...";
+
+    /// <summary>
+    /// When the current turn started. The bar counts from here, not from the
+    /// start of the step, so the number answers "how long have I been waiting".
+    /// </summary>
+    private DateTime? _turnStartedUtc;
+
+    /// <summary>
+    /// Title of the step in flight, or null between steps. Held with the id
+    /// that set it so a step completing out of order cannot blank the label
+    /// belonging to its successor.
+    /// </summary>
+    private string? _currentStep;
+    private string? _currentStepId;
+
+    /// <summary>
     /// The user is being waited on exactly while a banner is on screen. Read
     /// from the banner rather than counted: a counter has to be decremented on
     /// every path that takes a banner down — answered, cancelled by Stop, the
@@ -73,7 +95,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         IsBusy ? SessionActivity.Busy :
         SessionActivity.Idle;
 
-    partial void OnIsBusyChanged(bool value) => UpdateActivityIndicator();
+    partial void OnIsBusyChanged(bool value)
+    {
+        // Both the elapsed count and the step label belong to one turn.
+        _turnStartedUtc = value ? DateTime.UtcNow : null;
+        _currentStep = null;
+        _currentStepId = null;
+        UpdateActivityIndicator();
+    }
 
     partial void OnActiveBannerChanged(IBannerViewModel? value) => UpdateActivityIndicator();
 
@@ -81,7 +110,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     private void UpdateActivityIndicator()
     {
-        if (Activity == SessionActivity.Busy)
+        // Driven by IsBusy rather than Activity: the clock has to keep running
+        // while a permission or question banner is up, which is exactly when
+        // the user most wants to know how long this has been going on.
+        if (IsBusy)
         {
             EnsureActivityTimer();
             if (!_activityTimer!.IsEnabled) _activityTimer.Start();
@@ -91,6 +123,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _activityTimer?.Stop();
         }
         UpdateDisplayTitle();
+        UpdateBusyStatus();
     }
 
     private void EnsureActivityTimer()
@@ -107,7 +140,46 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             _spinnerFrame = (_spinnerFrame + 1) % SpinnerFrames.Length;
             UpdateDisplayTitle();
+            UpdateBusyStatus();
         };
+    }
+
+    /// <summary>
+    /// Rebuilds the line under the chat. Called on every spinner tick; the
+    /// text only changes once a second, and the generated setter drops a write
+    /// that would not change anything, so the binding is not woken for nothing.
+    /// </summary>
+    private void UpdateBusyStatus()
+    {
+        if (!IsBusy)
+        {
+            BusyStatus = "Thinking...";
+            return;
+        }
+
+        var label = IsAwaitingUser
+            ? "Waiting for you"
+            : _currentStep ?? "Thinking...";
+
+        if (_turnStartedUtc is null)
+        {
+            BusyStatus = label;
+            return;
+        }
+
+        var elapsed = DateTime.UtcNow - _turnStartedUtc.Value;
+        BusyStatus = $"{label} · {FormatElapsed(elapsed)}";
+    }
+
+    /// <summary>
+    /// Seconds up to a minute, then minutes and seconds — a bare "384s" stops
+    /// meaning anything once a task has been running for a while.
+    /// </summary>
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        var total = (int)elapsed.TotalSeconds;
+        if (total < 0) total = 0;
+        return total < 60 ? $"{total}s" : $"{total / 60}m {total % 60}s";
     }
 
     private void UpdateDisplayTitle()
@@ -138,6 +210,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public event Action<string, string, OutputBodyMode>? MessageBodySet;
     public event Action<string>? MessageCompleted;
     public event Action? AllCleared;
+
+    /// <summary>
+    /// Raised once the turn is over, so the view can stop presenting the last
+    /// run of steps as still in flight.
+    /// </summary>
+    public event Action? TurnEnded;
     public event Action<IEnumerable<ChatMessageData>>? MessagesRestored;
 
     /// <summary>
@@ -572,6 +650,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _sendCts?.Dispose();
             _sendCts = null;
             IsBusy = false;
+            TurnEnded?.Invoke();
         }
         RequestScroll();
     }
@@ -641,8 +720,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 Title = item.Title,
                 Status = item.Status.ToString(),
                 ExpanderTitle = expanderTitle,
-                IsStreaming = streaming
+                IsStreaming = streaming,
+                // For a tool step this is the formatted input — the path being
+                // read, the command being run. The folded row takes its first
+                // line, which is what turns "Using Read" into something worth
+                // reading while the task is still going.
+                Body = type == ChatItemType.ToolStep ? item.Body : null
             });
+
+            _currentStep = expanderTitle;
+            _currentStepId = item.Id;
+            UpdateBusyStatus();
             RequestScroll();
         });
     }
@@ -699,6 +787,15 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 }
 
                 MessageCompleted?.Invoke(item.Id);
+
+                // Back to the plain "Thinking..." until the next step names
+                // itself — but only if this is the step the bar is showing.
+                if (_currentStepId == item.Id)
+                {
+                    _currentStep = null;
+                    _currentStepId = null;
+                    UpdateBusyStatus();
+                }
 
                 _activeItems.TryRemove(item.Id, out _);
                 RequestScroll();
