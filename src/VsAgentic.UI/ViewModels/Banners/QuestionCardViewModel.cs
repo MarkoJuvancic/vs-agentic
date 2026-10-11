@@ -22,6 +22,7 @@ public partial class QuestionCardViewModel : ObservableObject, IBannerViewModel
     [NotifyPropertyChangedFor(nameof(CurrentQuestion))]
     [NotifyPropertyChangedFor(nameof(HeaderLabel))]
     [NotifyPropertyChangedFor(nameof(CounterText))]
+    [NotifyPropertyChangedFor(nameof(ShortcutHint))]
     [NotifyPropertyChangedFor(nameof(CanGoPrev))]
     [NotifyPropertyChangedFor(nameof(CanGoNext))]
     [NotifyCanExecuteChangedFor(nameof(GoPrevCommand))]
@@ -50,6 +51,24 @@ public partial class QuestionCardViewModel : ObservableObject, IBannerViewModel
     public bool IsAllAnswered => Questions.All(q => q.IsAnswered);
 
     public string SubmitLabel => IsAllAnswered ? "Submit" : "Next unanswered";
+
+    /// <summary>
+    /// The card's two keyboard shortcuts, spelled out next to the button.
+    /// Alt+N only reaches the ninth option, and the range follows the question
+    /// on screen rather than the longest one in the set.
+    /// </summary>
+    public string ShortcutHint
+    {
+        get
+        {
+            // The run covers the "Other" row too, which sits one past the
+            // listed options.
+            var count = Math.Min(CurrentQuestion.OtherOrdinal, 9);
+            if (count < 1) return "Ctrl+Enter to submit";
+            var keys = count == 1 ? "Alt+1" : $"Alt+1–{count}";
+            return $"{keys} to choose, Ctrl+Enter to submit";
+        }
+    }
 
     public QuestionCardViewModel(
         UserQuestionRequest request,
