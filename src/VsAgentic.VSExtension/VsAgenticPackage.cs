@@ -100,6 +100,10 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
         Initialized?.Invoke();
 
+        // Read on the main thread we are still on, so the update checks below can run
+        // on a background thread without touching GetDialogPage from off it.
+        var updateOptions = (VsAgenticOptionsPage?)GetDialogPage(typeof(VsAgenticOptionsPage));
+
         // Check the Marketplace for a newer published version and surface an InfoBar
         // if one is available. Fire-and-forget on a background task with a small delay
         // so we don't compete with VS startup work.
@@ -109,6 +113,12 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             {
                 await Task.Delay(TimeSpan.FromSeconds(10), DisposalToken);
                 await new UpdateChecker(this).CheckAsync(DisposalToken);
+
+                // Then the CLI the extension drives. It is installed and updated
+                // outside Visual Studio, so a stale one is otherwise invisible from
+                // here — run second so the extension's own banner comes first.
+                if (updateOptions is not null)
+                    await new ClaudeCliUpdateChecker(this, updateOptions).CheckAsync(DisposalToken);
             }
             catch (OperationCanceledException) { }
         }, cancellationToken);
