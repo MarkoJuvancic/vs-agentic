@@ -66,6 +66,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         _sessionStore = new JsonSessionStore();
 
         _sessionListViewModel = new SessionListViewModel();
+        _sessionListViewModel.ConfirmDelete = ConfirmSessionDelete;
 
         // Initialize persistence and load saved sessions
         await InitializeSessionPersistenceAsync();
@@ -192,6 +193,27 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         {
             System.Diagnostics.Debug.WriteLine($"VsAgentic: Failed to purge old sessions: {ex}");
         }
+    }
+
+    /// <summary>
+    /// Asks before a session is deleted. The shell's message box is used rather
+    /// than a WPF one so the dialog follows the Visual Studio theme and is modal
+    /// to the IDE.
+    /// </summary>
+    private bool ConfirmSessionDelete(SessionInfo session)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        var answer = VsShellUtilities.ShowMessageBox(
+            this,
+            "Its messages, images and conversation history are deleted from disk and cannot be restored.",
+            $"Delete the session \"{session.Name}\"?",
+            OLEMSGICON.OLEMSGICON_WARNING,
+            OLEMSGBUTTON.OLEMSGBUTTON_YESNO,
+            // Cancelling is the safe answer, so it is the one Enter picks.
+            OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_SECOND);
+
+        return answer == (int)Microsoft.VisualStudio.VSConstants.MessageBoxResult.IDYES;
     }
 
     private ChatSessionViewModel CreateChatViewModel()
