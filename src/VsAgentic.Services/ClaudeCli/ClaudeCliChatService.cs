@@ -242,7 +242,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 return;
 
             case "user":
-                // The CLI echoes user messages and tool_results; nothing to do here.
+                // The CLI echoes user messages and tool_results. The echo is
+                // where a failed tool call announces itself, so it is not
+                // entirely noise — see HandleUserEvent.
+                HandleUserEvent(evt);
                 return;
 
             case "result":
@@ -422,6 +425,40 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Reads the failure flag out of an echoed tool_result. The CLI reports a
+    /// failed tool call as <c>is_error</c> on the result block, and this is the
+    /// only place that flag arrives. Without it the step is closed by whatever
+    /// block comes next, which cannot tell a failed call from one that worked,
+    /// so every step ended up with the success mark.
+    /// </summary>
+    private void HandleUserEvent(JsonElement evt)
+    {
+        TurnState? turn;
+        lock (_activeTurnLock) { turn = _activeTurn; }
+        if (turn?.ToolItem == null) return;
+
+        if (!evt.TryGetProperty("message", out var msg)) return;
+        if (!msg.TryGetProperty("content", out var contentArr)) return;
+        if (contentArr.ValueKind != JsonValueKind.Array) return;
+
+        foreach (var block in contentArr.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type", out var bt)) continue;
+            if (bt.GetString() != "tool_result") continue;
+            if (!block.TryGetProperty("is_error", out var ep)) continue;
+            if (ep.ValueKind != JsonValueKind.True) continue;
+
+            // Only the open step can be marked. A result for any other call
+            // belongs to a step that is already closed, or to one the UI never
+            // showed, such as the suppressed AskUserQuestion.
+            var toolUseId = block.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+            if (turn.ToolItem == null || toolUseId != turn.ToolItem.Id) continue;
+
+            CompleteToolItem(turn, OutputItemStatus.Error);
+        }
+    }
+
     private void HandleToolResultBlock(TurnState turn, JsonElement block)
     {
         // The matching tool_use for AskUserQuestion was suppressed from the UI;
@@ -432,7 +469,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         if (turn.ToolItem == null) return;
         var content = block.TryGetProperty("content", out var cp) ? ExtractToolResultText(cp) : "";
-        turn.ToolItem.Status = OutputItemStatus.Success;
+
+        // Same flag as in HandleUserEvent: a result block that carries is_error
+        // belongs to a call that failed.
+        var isError = block.TryGetProperty("is_error", out var ep) && ep.ValueKind == JsonValueKind.True;
+        turn.ToolItem.Status = isError ? OutputItemStatus.Error : OutputItemStatus.Success;
         if (turn.ToolItem.ToolName != "Agent")
             turn.ToolItem.Title = $"Used {turn.ToolItem.ToolName}";
         turn.ToolItem.Body = content;
@@ -521,13 +562,24 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     {
         if (turn.ToolItem == null) return;
         if (turn.ToolItem.Status == OutputItemStatus.Pending)
-        {
-            turn.ToolItem.Status = OutputItemStatus.Success;
-            if (turn.ToolItem.ToolName != "Agent")
-                turn.ToolItem.Title = $"Used {turn.ToolItem.ToolName}";
-            turn.ToolItem.Delta = null;
-            _outputListener.OnStepCompleted(turn.ToolItem);
-        }
+            CompleteToolItem(turn, OutputItemStatus.Success);
+        turn.ToolItem = null;
+    }
+
+    /// <summary>
+    /// Closes the open tool step with the given status. A step closed as an
+    /// error is still the finished step, so the title reads the same way.
+    /// </summary>
+    private void CompleteToolItem(TurnState turn, OutputItemStatus status)
+    {
+        var item = turn.ToolItem;
+        if (item == null) return;
+
+        item.Status = status;
+        if (item.ToolName != "Agent")
+            item.Title = $"Used {item.ToolName}";
+        item.Delta = null;
+        _outputListener.OnStepCompleted(item);
         turn.ToolItem = null;
     }
 
