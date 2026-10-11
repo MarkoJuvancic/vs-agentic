@@ -12,6 +12,11 @@
              PreviewKeyDown="OnPreviewKeyDown" >
 
     <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/VsAgentic.VSExtension;component/ToolWindows/SharedStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <controls:MinWidthVisibilityConverter x:Key="MinWidth"/>
 
@@ -242,6 +247,7 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        </ResourceDictionary>
     </UserControl.Resources>
 
     <DockPanel x:Name="RootPanel"
@@ -466,10 +472,18 @@
                                                   ItemContainerStyle="{StaticResource StatusComboItemStyle}"
                                                   ItemsSource="{Binding ModelOptions}"
                                                   SelectedItem="{Binding SelectedModel}"
-                                                  ToolTip="{Binding ModelDisplay, StringFormat='Model: {0}&#x0a;Takes effect on the next message.'}"
                                                   Visibility="{Binding ActualWidth, ElementName=StatusInfo,
                                                                Converter={StaticResource MinWidth},
                                                                ConverterParameter=405}">
+                                            <!-- A TextBlock, not ToolTip="{Binding ...
+                                                 StringFormat=...}": the ToolTip property
+                                                 is typed object, so the binding has no
+                                                 target type to format to and the tooltip
+                                                 reads as the bare model name. -->
+                                            <ComboBox.ToolTip>
+                                                <TextBlock Text="{Binding ModelDisplay,
+                                                           StringFormat='Model: {0}&#x0a;Takes effect on the next message.'}"/>
+                                            </ComboBox.ToolTip>
                                             <ComboBox.ItemTemplate>
                                                 <DataTemplate>
                                                     <TextBlock Text="{Binding DisplayName}"/>
@@ -520,6 +534,44 @@
                        TextTrimming="CharacterEllipsis"
                        Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"
                        FontSize="12" FontStyle="Italic"/>
+        </Border>
+
+        <!-- Background tasks: commands started with run_in_background. They
+             outlive the turn, so this strip stays up between turns until the
+             CLI reports them done. The pulse uses opacity only, so it needs no
+             accent color from the theme. -->
+        <Border DockPanel.Dock="Bottom"
+                LayoutTransform="{StaticResource ChromeZoom}"
+                Margin="6,4,6,0"
+                Padding="8,4"
+                CornerRadius="4"
+                BorderThickness="1"
+                BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}"
+                Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
+                ToolTip="{Binding BackgroundTasksTooltip}"
+                Visibility="{Binding HasBackgroundTasks, Converter={StaticResource BoolToVis}}">
+            <DockPanel>
+                <Ellipse DockPanel.Dock="Left"
+                         Width="8" Height="8"
+                         Margin="0,0,8,0"
+                         VerticalAlignment="Center"
+                         Fill="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}">
+                    <Ellipse.Triggers>
+                        <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                    <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                     From="1" To="0.2" Duration="0:0:0.8"/>
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </Ellipse.Triggers>
+                </Ellipse>
+                <TextBlock Text="{Binding BackgroundTasksText}"
+                           TextTrimming="CharacterEllipsis"
+                           FontSize="12"
+                           Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+            </DockPanel>
         </Border>
 
         <!-- Banner host: permission / question / login banner. The DataTemplates

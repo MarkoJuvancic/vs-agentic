@@ -37,6 +37,12 @@ public class VsAgenticOptionsPage : DialogPage
     [DefaultValue(ClaudeEffort.Default)]
     public ClaudeEffort Effort { get; set; } = ClaudeEffort.Default;
 
+    [Category("Claude CLI")]
+    [DisplayName("Check for CLI updates")]
+    [Description("On startup, compare the Claude Code CLI against the latest release published on the npm registry and show a banner when a newer one exists. The banner offers to run 'claude update' in a console window. Nothing is installed without a click.")]
+    [DefaultValue(true)]
+    public bool CheckForCliUpdates { get; set; } = true;
+
     [Category("Usage meters")]
     [DisplayName("Plan")]
     [Description("Subscription the 5-hour and weekly readings under the chat input are sized against. Display only — nothing here is sent to the CLI. Choose Unlimited to hide those readings.")]
