@@ -73,6 +73,14 @@ public partial class SessionInfo : ObservableObject
     private bool _isArchived;
 
     /// <summary>
+    /// True on the first unpinned row when pinned rows sit above it in the
+    /// visible list. The row draws a separator there, so the two groups read
+    /// apart. Set by <see cref="SessionListViewModel"/>.
+    /// </summary>
+    [ObservableProperty]
+    private bool _startsUnpinnedGroup;
+
+    /// <summary>
     /// True while the row shows its inline rename box. Only one session at a
     /// time is in this state.
     /// </summary>
@@ -154,6 +162,27 @@ public partial class SessionListViewModel : ObservableObject
                 || s.Name.IndexOf(SearchText, StringComparison.OrdinalIgnoreCase) >= 0);
 
         Sessions.CollectionChanged += (_, _) => OnPropertyChanged(nameof(ArchiveButtonText));
+
+        // Fires on every add, remove, move and filter refresh.
+        FilteredSessions.CollectionChanged += (_, _) => UpdatePinnedBoundary();
+    }
+
+    /// <summary>
+    /// Marks the row where the pinned group ends. Works on the visible list,
+    /// so a search that hides every pinned row also hides the separator.
+    /// </summary>
+    private void UpdatePinnedBoundary()
+    {
+        var pinnedAbove = false;
+        var marked = false;
+
+        foreach (SessionInfo session in FilteredSessions)
+        {
+            var starts = !marked && pinnedAbove && !session.IsPinned;
+            session.StartsUnpinnedGroup = starts;
+            marked |= starts;
+            pinnedAbove |= session.IsPinned;
+        }
     }
 
     partial void OnSearchTextChanged(string value) => FilteredSessions.Refresh();
@@ -253,6 +282,9 @@ public partial class SessionListViewModel : ObservableObject
 
         session.IsPinned = !session.IsPinned;
         ApplyPinnedOrder();
+
+        // A row already in place does not move, so the list raises no change.
+        UpdatePinnedBoundary();
 
         if (session.PersistedId.HasValue && _sessionStore is not null && _folderPath is not null)
         {
