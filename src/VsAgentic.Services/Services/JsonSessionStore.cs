@@ -181,6 +181,13 @@ public class JsonSessionStore : ISessionStore
             if (entry is null) return;
 
             entry.ArchivedUtc = archived ? DateTime.UtcNow : null;
+
+            // A restore counts as activity. Without it a session the clean-up
+            // archived is still past the cutoff, and the next startup archives
+            // it again.
+            if (!archived)
+                entry.LastActivityUtc = DateTime.UtcNow;
+
             await WriteJsonAsync(indexPath, index);
 
             // session.json is the copy a session folder carries for itself; it

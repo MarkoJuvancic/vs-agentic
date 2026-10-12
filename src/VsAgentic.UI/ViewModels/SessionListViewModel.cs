@@ -448,6 +448,15 @@ public partial class SessionListViewModel : ObservableObject
 
         session.IsArchived = archived;
 
+        // The store counts a restore as activity, so the row shows it and
+        // takes the place the next load gives it: newest in its group.
+        if (!archived)
+        {
+            session.LastActivity = DateTime.Now;
+            var target = session.IsPinned ? 0 : Sessions.TakeWhile(s => s.IsPinned).Count();
+            Sessions.Move(Sessions.IndexOf(session), target);
+        }
+
         // The row belongs to the other view now, so it leaves the one on
         // screen. Its window goes with it when it is archived; restoring does
         // not reopen a window the user did not ask for.

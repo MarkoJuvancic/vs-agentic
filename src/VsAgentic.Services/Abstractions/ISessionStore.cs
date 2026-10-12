@@ -17,7 +17,9 @@ public interface ISessionStore
 
     /// <summary>
     /// Marks a session as archived, or clears that mark when
-    /// <paramref name="archived"/> is false. Nothing on disk moves.
+    /// <paramref name="archived"/> is false. Nothing on disk moves. Clearing
+    /// the mark also sets the last activity to now, so the startup clean-up
+    /// does not archive the session again.
     /// </summary>
     Task SetSessionArchivedAsync(string folderPath, int sessionId, bool archived);
 
