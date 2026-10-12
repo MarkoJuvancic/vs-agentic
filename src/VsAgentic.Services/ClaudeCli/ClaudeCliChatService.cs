@@ -1256,6 +1256,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _countedMessageIds.Clear();
         }
 
+        // Forget the running steps before the process goes, or the dispatcher
+        // reports them as stopped into the transcript that was just cleared.
+        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Clear(); }
+
         _host.Stop();
         lock (_dispatcherLock) { _dispatcherTask = null; }
         _logger.LogInformation("[ClaudeCli] Session cleared (process killed)");
