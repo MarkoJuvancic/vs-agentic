@@ -4,7 +4,16 @@ namespace VsAgentic.Services.Abstractions;
 
 public interface IChatService
 {
-    IAsyncEnumerable<string> SendMessageAsync(string userMessage, CancellationToken cancellationToken = default);
+    /// <param name="images">
+    /// Images to send alongside the text. They travel inline as base64 blocks,
+    /// so nothing is written to the project. Null or empty sends text only,
+    /// which keeps the wire format identical to what it was before images
+    /// existed.
+    /// </param>
+    IAsyncEnumerable<string> SendMessageAsync(
+        string userMessage,
+        IReadOnlyList<ChatImageAttachment>? images = null,
+        CancellationToken cancellationToken = default);
     Task<string> GenerateTitleAsync(string userMessage, CancellationToken cancellationToken = default);
     void ClearHistory();
 
@@ -62,10 +71,11 @@ public interface IChatService
     /// <summary>
     /// Switches the model and/or reasoning effort for this session.
     ///
-    /// Both are start-up flags on the CLI, so the running process is torn down
-    /// here and the next <see cref="SendMessageAsync"/> starts a fresh one that
-    /// resumes the same conversation. Nothing is lost, but the next message
-    /// pays the process-start cost. A no-op when neither value changed.
+    /// A running process takes the change at once and applies it from its next
+    /// API request, also within a running turn. A process started later gets
+    /// it as start-up flags. If the running process cannot take it, the next
+    /// <see cref="SendMessageAsync"/> restarts the process and resumes the same
+    /// conversation. A no-op when neither value changed.
     /// </summary>
     void ApplyModelAndEffort(string modelAlias, ClaudeEffort effort);
 
@@ -84,4 +94,17 @@ public interface IChatService
     /// new credentials.
     /// </summary>
     void LaunchLogin();
+
+    /// <summary>
+    /// The tasks the CLI is running in the background right now. Empty when
+    /// none run, and after the CLI process stops, which ends them.
+    /// </summary>
+    IReadOnlyList<BackgroundTask> BackgroundTasks { get; }
+
+    /// <summary>
+    /// Raised when <see cref="BackgroundTasks"/> changes, carrying the new list.
+    /// Can fire between turns. Raised on a background thread; hosts must
+    /// marshal to the UI thread.
+    /// </summary>
+    event Action<IReadOnlyList<BackgroundTask>>? BackgroundTasksChanged;
 }
