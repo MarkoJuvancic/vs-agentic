@@ -66,6 +66,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         _sessionStore = new JsonSessionStore();
 
         _sessionListViewModel = new SessionListViewModel();
+        _sessionListViewModel.ConfirmDelete = ConfirmSessionDelete;
 
         // Initialize persistence and load saved sessions
         await InitializeSessionPersistenceAsync();
@@ -99,6 +100,10 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
         Initialized?.Invoke();
 
+        // Read on the main thread we are still on, so the update checks below can run
+        // on a background thread without touching GetDialogPage from off it.
+        var updateOptions = (VsAgenticOptionsPage?)GetDialogPage(typeof(VsAgenticOptionsPage));
+
         // Check the Marketplace for a newer published version and surface an InfoBar
         // if one is available. Fire-and-forget on a background task with a small delay
         // so we don't compete with VS startup work.
@@ -108,6 +113,12 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             {
                 await Task.Delay(TimeSpan.FromSeconds(10), DisposalToken);
                 await new UpdateChecker(this).CheckAsync(DisposalToken);
+
+                // Then the CLI the extension drives. It is installed and updated
+                // outside Visual Studio, so a stale one is otherwise invisible from
+                // here — run second so the extension's own banner comes first.
+                if (updateOptions is not null)
+                    await new ClaudeCliUpdateChecker(this, updateOptions).CheckAsync(DisposalToken);
             }
             catch (OperationCanceledException) { }
         }, cancellationToken);
@@ -192,6 +203,27 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         {
             System.Diagnostics.Debug.WriteLine($"VsAgentic: Failed to purge old sessions: {ex}");
         }
+    }
+
+    /// <summary>
+    /// Asks before a session is deleted. The shell's message box is used rather
+    /// than a WPF one so the dialog follows the Visual Studio theme and is modal
+    /// to the IDE.
+    /// </summary>
+    private bool ConfirmSessionDelete(SessionInfo session)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        var answer = VsShellUtilities.ShowMessageBox(
+            this,
+            "Its messages, images and conversation history are deleted from disk and cannot be restored.",
+            $"Delete the session \"{session.Name}\"?",
+            OLEMSGICON.OLEMSGICON_WARNING,
+            OLEMSGBUTTON.OLEMSGBUTTON_YESNO,
+            // Cancelling is the safe answer, so it is the one Enter picks.
+            OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_SECOND);
+
+        return answer == (int)Microsoft.VisualStudio.VSConstants.MessageBoxResult.IDYES;
     }
 
     private ChatSessionViewModel CreateChatViewModel()
@@ -611,15 +643,20 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 return;
             }
 
+            // TryParse, because the regex only checks that the suffix is digits.
+            // "foo.cs:99999999999" overflows, and the throw would land in the
+            // outer fire-and-forget task where nobody sees it. Line 0 means
+            // "open the file and leave the caret alone", which is the right
+            // outcome for a number no editor could scroll to anyway.
             if (lineMatch.Success)
-                line = int.Parse(lineMatch.Groups[1].Value);
+                int.TryParse(lineMatch.Groups[1].Value, out line);
 
             try
             {
                 switch (action)
                 {
                     case FileLinkAction.Open when Directory.Exists(resolved):
-                        System.Diagnostics.Process.Start("explorer.exe", $"\"{resolved}\"");
+                        StartExplorer($"\"{resolved}\"");
                         break;
 
                     case FileLinkAction.Open:
@@ -632,7 +669,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                         break;
 
                     case FileLinkAction.ShowInExplorer:
-                        System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{resolved}\"");
+                        StartExplorer($"/select,\"{resolved}\"");
                         break;
                 }
             }
@@ -642,6 +679,16 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 SetStatusBarText($"VsAgentic: {action} failed for {resolved}");
             }
         });
+    }
+
+    /// <summary>
+    /// Opens Explorer and releases the handle. We never wait on it or read its
+    /// exit code, so holding the <see cref="System.Diagnostics.Process"/> only
+    /// keeps a native handle alive for the life of Visual Studio.
+    /// </summary>
+    private static void StartExplorer(string arguments)
+    {
+        using var process = System.Diagnostics.Process.Start("explorer.exe", arguments);
     }
 
     /// <summary>
@@ -656,6 +703,12 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
     {
         try
         {
+            // The link text comes from model output, so a UNC path can name any
+            // host. The existence check below would connect to it over SMB, and
+            // Open or Show in Explorer would then open Explorer on the share.
+            // Device paths (\\?\, \\.\) are refused by the same test.
+            if (path.StartsWith(@"\\", StringComparison.Ordinal)) return null;
+
             if (Path.IsPathRooted(path))
                 return PathExists(path) ? Path.GetFullPath(path) : null;
 

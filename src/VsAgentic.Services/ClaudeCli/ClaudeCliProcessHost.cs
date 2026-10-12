@@ -187,8 +187,10 @@ public sealed class ClaudeCliProcessHost : IDisposable
         sb.Append(" --permission-mode ");
         sb.Append(permFlag);
 
-        // Model and effort are start-up flags, which is why changing either one
-        // in the chat window restarts this process.
+        // Model and effort are start-up flags. A change in the chat window goes
+        // to a running process as a control request instead (see
+        // ClaudeCliChatService.ApplyModelAndEffort); these flags cover every
+        // start after that.
         //
         // Both are sent only when the user has picked a value. An empty model
         // leaves the CLI's own choice alone, and its init event reports what it
