@@ -1102,6 +1102,14 @@ function addMessage(id, type, dataJson) {
         _userScrolledUp = false;
         scrollToBottom();
         updateScrollButton();
+    } else if (type === 'Notice') {
+        // Background work ending is a boundary like a prompt: the CLI wakes up
+        // after it and starts a turn of its own. Close the row so that turn's
+        // steps do not fold into the last one, nor take its reply with them,
+        // and leave the notice standing.
+        closeActivityGroup();
+        _container.appendChild(div);
+        maybeScrollToBottom();
     } else if (isTurnFailure(type, data)) {
         // Left standing, and the text before it left alone: when a turn ends in
         // an error, that text is usually as far as the answer got, and folding
