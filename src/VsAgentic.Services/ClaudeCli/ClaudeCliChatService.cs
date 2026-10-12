@@ -84,6 +84,19 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     // up to the next result event instead of being shown as a turn of its own.
     private bool _discardUntilResult;
 
+    // ── Control requests ──────────────────────────────────────────────────
+    // A model or effort change goes to the running process as a control
+    // request. The dispatcher completes the matching entry when the CLI
+    // answers; the result is the error text, or null on success.
+    private readonly Dictionary<string, TaskCompletionSource<string?>> _pendingControl =
+        new Dictionary<string, TaskCompletionSource<string?>>(StringComparer.Ordinal);
+    private int _controlRequestSeq;
+    private static readonly TimeSpan ControlRequestTimeout = TimeSpan.FromSeconds(10);
+
+    // Set when the running process could not take a change. The next message
+    // then restarts it, so the change still lands — but never mid-turn.
+    private volatile bool _restartBeforeNextMessage;
+
     public ClaudeCliChatService(
         IOptions<VsAgenticOptions> options,
         IOutputListener outputListener,
@@ -116,11 +129,20 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     public async IAsyncEnumerable<string> SendMessageAsync(
         string userMessage,
+        IReadOnlyList<ChatImageAttachment>? images = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         // Lazy start: bring the long-running process up if it's not running.
         try
         {
+            if (_restartBeforeNextMessage)
+            {
+                _restartBeforeNextMessage = false;
+                _host.Stop();
+                lock (_dispatcherLock) { _dispatcherTask = null; }
+                _logger.LogInformation("[ClaudeCli] Restarting CLI to apply a model/effort change");
+            }
+
             _host.SetResumeSessionId(_cliSessionId);
             await _host.EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
             EnsureDispatcherStarted();
@@ -149,7 +171,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Send the user message line.
         try
         {
-            var line = StreamJsonProtocol.BuildUserTextMessage(userMessage);
+            var line = images is { Count: > 0 }
+                ? StreamJsonProtocol.BuildUserMessageWithImages(userMessage, images)
+                : StreamJsonProtocol.BuildUserTextMessage(userMessage);
             await _host.WriteLineAsync(line, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -289,6 +313,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 if (turn.Unsolicited)
                     RaiseUnsolicitedTurnCompleted();
             }
+
+            // Background tasks are children of the CLI and end with it.
+            SetBackgroundTasks(Array.Empty<BackgroundTask>());
         }
     }
 
@@ -309,18 +336,51 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 return;
 
             case "user":
-                // The CLI echoes user messages and tool_results; nothing to do here.
+                // The CLI echoes user messages and tool_results. The echo is
+                // where a failed tool call announces itself, so it is not
+                // entirely noise — see HandleUserEvent.
+                HandleUserEvent(evt);
                 return;
 
             case "result":
                 HandleResultEvent(evt);
                 return;
+
+            case "control_response":
+                HandleControlResponse(evt);
+                return;
         }
+    }
+
+    private void HandleControlResponse(JsonElement evt)
+    {
+        if (!evt.TryGetProperty("response", out var response)) return;
+        var requestId = response.TryGetProperty("request_id", out var id) ? id.GetString() : null;
+        if (requestId is null) return;
+
+        TaskCompletionSource<string?>? pending;
+        lock (_pendingControl)
+        {
+            if (!_pendingControl.TryGetValue(requestId, out pending)) return;
+            _pendingControl.Remove(requestId);
+        }
+
+        var ok = response.TryGetProperty("subtype", out var st) && st.GetString() == "success";
+        var error = ok ? null
+            : response.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String
+                ? e.GetString() ?? "error"
+                : "error";
+        pending.TrySetResult(error);
     }
 
     private void HandleSystemEvent(JsonElement evt)
     {
         var subtype = evt.TryGetProperty("subtype", out var s) ? s.GetString() : null;
+        if (subtype == "background_tasks_changed")
+        {
+            HandleBackgroundTasksChanged(evt);
+            return;
+        }
         if (subtype != "init") return;
         if (evt.TryGetProperty("session_id", out var sid))
         {
@@ -350,6 +410,40 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
     }
 
+    // The event carries the whole list of running tasks, not a change, so the
+    // list is replaced each time. It arrives between turns as well.
+    private void HandleBackgroundTasksChanged(JsonElement evt)
+    {
+        var tasks = new List<BackgroundTask>();
+        if (evt.TryGetProperty("tasks", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var t in arr.EnumerateArray())
+            {
+                var id = t.TryGetProperty("task_id", out var ip) ? ip.GetString() : null;
+                if (string.IsNullOrEmpty(id)) continue;
+                var description = t.TryGetProperty("description", out var dp) ? dp.GetString() : null;
+                var type = t.TryGetProperty("task_type", out var tp) ? tp.GetString() : null;
+                tasks.Add(new BackgroundTask(id!, string.IsNullOrWhiteSpace(description) ? id! : description!, type));
+            }
+        }
+        SetBackgroundTasks(tasks);
+    }
+
+    private void SetBackgroundTasks(IReadOnlyList<BackgroundTask> tasks)
+    {
+        if (tasks.Count == 0 && _backgroundTasks.Count == 0) return;
+        _backgroundTasks = tasks;
+        _logger.LogInformation("[ClaudeCli] Background tasks: {Count}", tasks.Count);
+        try { BackgroundTasksChanged?.Invoke(tasks); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] BackgroundTasksChanged handler threw"); }
+    }
+
+    private volatile IReadOnlyList<BackgroundTask> _backgroundTasks = Array.Empty<BackgroundTask>();
+
+    public IReadOnlyList<BackgroundTask> BackgroundTasks => _backgroundTasks;
+
+    public event Action<IReadOnlyList<BackgroundTask>>? BackgroundTasksChanged;
+
     private async Task HandleAssistantEventAsync(JsonElement evt)
     {
         TurnState? turn;
@@ -361,6 +455,18 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Before the content check: a message can carry usage worth counting
         // even when its content block is one we do not render.
         AccountUsage(msg);
+
+        // A failed sign-in arrives as a synthetic assistant message whose text
+        // is the error, tagged with "error": "authentication_failed". The tag
+        // is a steadier signal than the wording. Do not render the text: the
+        // result event that follows raises the login banner.
+        if (evt.TryGetProperty("error", out var errorProp)
+            && errorProp.ValueKind == JsonValueKind.String
+            && errorProp.GetString() == "authentication_failed")
+        {
+            turn.AuthFailed = true;
+            return;
+        }
 
         if (!msg.TryGetProperty("content", out var contentArr)) return;
         if (contentArr.ValueKind != JsonValueKind.Array) return;
@@ -489,6 +595,40 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Reads the failure flag out of an echoed tool_result. The CLI reports a
+    /// failed tool call as <c>is_error</c> on the result block, and this is the
+    /// only place that flag arrives. Without it the step is closed by whatever
+    /// block comes next, which cannot tell a failed call from one that worked,
+    /// so every step ended up with the success mark.
+    /// </summary>
+    private void HandleUserEvent(JsonElement evt)
+    {
+        TurnState? turn;
+        lock (_activeTurnLock) { turn = _activeTurn; }
+        if (turn?.ToolItem == null) return;
+
+        if (!evt.TryGetProperty("message", out var msg)) return;
+        if (!msg.TryGetProperty("content", out var contentArr)) return;
+        if (contentArr.ValueKind != JsonValueKind.Array) return;
+
+        foreach (var block in contentArr.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type", out var bt)) continue;
+            if (bt.GetString() != "tool_result") continue;
+            if (!block.TryGetProperty("is_error", out var ep)) continue;
+            if (ep.ValueKind != JsonValueKind.True) continue;
+
+            // Only the open step can be marked. A result for any other call
+            // belongs to a step that is already closed, or to one the UI never
+            // showed, such as the suppressed AskUserQuestion.
+            var toolUseId = block.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+            if (turn.ToolItem == null || toolUseId != turn.ToolItem.Id) continue;
+
+            CompleteToolItem(turn, OutputItemStatus.Error);
+        }
+    }
+
     private void HandleToolResultBlock(TurnState turn, JsonElement block)
     {
         // The matching tool_use for AskUserQuestion was suppressed from the UI;
@@ -499,7 +639,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         if (turn.ToolItem == null) return;
         var content = block.TryGetProperty("content", out var cp) ? ExtractToolResultText(cp) : "";
-        turn.ToolItem.Status = OutputItemStatus.Success;
+
+        // Same flag as in HandleUserEvent: a result block that carries is_error
+        // belongs to a call that failed.
+        var isError = block.TryGetProperty("is_error", out var ep) && ep.ValueKind == JsonValueKind.True;
+        turn.ToolItem.Status = isError ? OutputItemStatus.Error : OutputItemStatus.Success;
         if (turn.ToolItem.ToolName != "Agent")
             turn.ToolItem.Title = $"Used {turn.ToolItem.ToolName}";
         turn.ToolItem.Body = content;
@@ -532,10 +676,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             // Surface authentication failures via the LoginRequired event
             // (rendered as a banner) instead of the in-chat error step. The
-            // patterns below are taken from Anthropic's published error
-            // reference at https://code.claude.com/docs/en/errors and are part
-            // of their public contract.
-            if (LooksLikeAuthError(resultText))
+            // assistant message flags them as "authentication_failed"; the
+            // text patterns cover CLI versions that do not send the flag.
+            if (turn.AuthFailed || LooksLikeAuthError(resultText))
             {
                 try { LoginRequired?.Invoke(resultText); }
                 catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] LoginRequired handler threw"); }
@@ -604,13 +747,24 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     {
         if (turn.ToolItem == null) return;
         if (turn.ToolItem.Status == OutputItemStatus.Pending)
-        {
-            turn.ToolItem.Status = OutputItemStatus.Success;
-            if (turn.ToolItem.ToolName != "Agent")
-                turn.ToolItem.Title = $"Used {turn.ToolItem.ToolName}";
-            turn.ToolItem.Delta = null;
-            _outputListener.OnStepCompleted(turn.ToolItem);
-        }
+            CompleteToolItem(turn, OutputItemStatus.Success);
+        turn.ToolItem = null;
+    }
+
+    /// <summary>
+    /// Closes the open tool step with the given status. A step closed as an
+    /// error is still the finished step, so the title reads the same way.
+    /// </summary>
+    private void CompleteToolItem(TurnState turn, OutputItemStatus status)
+    {
+        var item = turn.ToolItem;
+        if (item == null) return;
+
+        item.Status = status;
+        if (item.ToolName != "Agent")
+            item.Title = $"Used {item.ToolName}";
+        item.Delta = null;
+        _outputListener.OnStepCompleted(item);
         turn.ToolItem = null;
     }
 
@@ -790,7 +944,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             var psi = new ProcessStartInfo
             {
                 FileName = _options.ClaudeCliPath,
-                Arguments = "-p --output-format text",
+                // --no-session-persistence keeps this throwaway call from writing
+                // a transcript. Without it every new chat leaves a second, unused
+                // CLI session on disk. The flag is sent unconditionally: a CLI
+                // that does not know it prints nothing, and the title falls back
+                // to the first line of the user message.
+                Arguments = "-p --output-format text --no-session-persistence",
                 WorkingDirectory = _options.WorkingDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -816,9 +975,19 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             var result = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
             await Task.Run(() => process.WaitForExit(), cancellationToken).ConfigureAwait(false);
 
-            var title = SanitizeTitle(result);
-            if (!string.IsNullOrWhiteSpace(title))
-                return title;
+            // A failed call (sign-in, rate limit, network) prints its error to
+            // stdout and exits non-zero. That text must not become the title.
+            if (process.ExitCode != 0)
+            {
+                _logger.LogWarning("[ClaudeCli] Title generation exited with code {Code}: {Output}, using fallback",
+                    process.ExitCode, result.Trim());
+            }
+            else
+            {
+                var title = SanitizeTitle(result);
+                if (!string.IsNullOrWhiteSpace(title))
+                    return title;
+            }
         }
         catch (Exception ex)
         {
@@ -1001,36 +1170,91 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     {
         var alias = (modelAlias ?? "").Trim();
         var modelChanged = !string.Equals(_options.Model, alias, StringComparison.OrdinalIgnoreCase);
-        if (!modelChanged && _options.Effort == effort)
+        var effortChanged = _options.Effort != effort;
+        if (!modelChanged && !effortChanged)
         {
             return;
         }
 
+        // The options feed the start-up flags, so a process started later picks
+        // up the change on its own. Only a running process needs to be told.
         _options.Model = alias;
         _options.Effort = effort;
 
-        // Both are start-up flags, so the running process cannot pick them up.
-        // Killing it here leaves _cliSessionId intact, which means the next
-        // SendMessageAsync starts a fresh process with --resume and the
-        // conversation carries on where it left off.
-        try
+        if (_host.IsRunning)
         {
-            _host.Stop();
-            lock (_dispatcherLock) { _dispatcherTask = null; }
-            _logger.LogInformation(
-                "[ClaudeCli] Model/effort set to '{Model}'/'{Effort}'; process restarts on next message",
-                alias.Length == 0 ? "(cli default)" : alias, effort);
+            _ = ApplyToRunningProcessAsync(
+                modelChanged, alias.Length == 0 ? null : alias,
+                effortChanged, effort == ClaudeEffort.Default ? null : effort.ToCliValue());
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogError(ex, "[ClaudeCli] Failed to stop CLI after a model/effort change");
+            _logger.LogInformation(
+                "[ClaudeCli] Model/effort set to '{Model}'/'{Effort}'; applies when the CLI starts",
+                alias.Length == 0 ? "(cli default)" : alias, effort);
         }
 
         // The model reported so far no longer describes what the next turn runs
-        // on. Clearing it lets the host fall back to its preview until the new
-        // process reports the real one.
+        // on. Clearing it lets the host fall back to its preview until the next
+        // init event reports the real one. The CLI sends init on every turn.
         if (modelChanged)
             SetCurrentModel(null);
+    }
+
+    /// <summary>
+    /// Sends a model/effort change to the running CLI as an
+    /// <c>apply_flag_settings</c> control request. The CLI applies it from its
+    /// next API request on, which within a turn means the next step.
+    ///
+    /// A null value returns the setting to the CLI default — the Default entry
+    /// in either picker. Only changed settings are sent, so an effort change
+    /// does not count as a model switch on the CLI side.
+    ///
+    /// The CLI answers success even for a value it ignores, so a success only
+    /// means the request was understood. An error or no answer means a CLI that
+    /// does not know the request; the change then waits for a restart before the
+    /// next message, which is the old behavior without the mid-turn kill.
+    /// </summary>
+    private async Task ApplyToRunningProcessAsync(
+        bool includeModel, string? model, bool includeEffort, string? effort)
+    {
+        var requestId = "vsagentic-" + Interlocked.Increment(ref _controlRequestSeq);
+        var pending = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_pendingControl) { _pendingControl[requestId] = pending; }
+
+        string? error;
+        try
+        {
+            EnsureDispatcherStarted();
+            var line = StreamJsonProtocol.BuildApplyFlagSettings(
+                requestId, includeModel, model, includeEffort, effort);
+            await _host.WriteLineAsync(line, CancellationToken.None).ConfigureAwait(false);
+
+            var done = await Task.WhenAny(pending.Task, Task.Delay(ControlRequestTimeout)).ConfigureAwait(false);
+            error = done == pending.Task ? pending.Task.Result : "no response";
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            lock (_pendingControl) { _pendingControl.Remove(requestId); }
+        }
+
+        if (error is null)
+        {
+            _logger.LogInformation(
+                "[ClaudeCli] Model/effort applied to the running CLI: model {Model}, effort {Effort}",
+                includeModel ? model ?? "(cli default)" : "(unchanged)",
+                includeEffort ? effort ?? "(cli default)" : "(unchanged)");
+            return;
+        }
+
+        _restartBeforeNextMessage = true;
+        _logger.LogWarning(
+            "[ClaudeCli] CLI did not take the model/effort change ({Error}); restarting before the next message",
+            error);
     }
 
     public void ClearHistory()
@@ -1134,6 +1358,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Phrases pulled verbatim from the documented messages at
         // https://code.claude.com/docs/en/errors (Authentication errors section).
         return t.Contains("please run /login")
+            || t.Contains("failed to authenticate")
             || t.Contains("not logged in")
             || t.Contains("invalid api key")
             || t.Contains("oauth token")
@@ -1161,6 +1386,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         // Set by the dispatcher, read by SendMessageAsync after a cancel.
         public volatile bool ResultReceived;
+
+        // Set when the CLI flags an assistant message as "authentication_failed".
+        public bool AuthFailed;
 
         // tool_use ids whose tool_result should be skipped (e.g. AskUserQuestion,
         // which we hide from the UI step list).
