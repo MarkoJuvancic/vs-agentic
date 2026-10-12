@@ -291,13 +291,16 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     // True while a turn the CLI started on its own is running. It holds the
     // session busy like a sent message does, so Send stays off and Stop works.
+    //
+    // Such a turn can start while SendAsync is still closing the turn before
+    // it (the service already has that turn's result). Whichever of the two
+    // ends last clears IsBusy and ends the turn in the view.
     private bool _inUnsolicitedTurn;
 
     private void OnUnsolicitedTurnStarted()
     {
         Dispatch(() =>
         {
-            if (IsBusy) return;
             _inUnsolicitedTurn = true;
             IsBusy = true;
         });
@@ -309,8 +312,13 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             if (!_inUnsolicitedTurn) return;
             _inUnsolicitedTurn = false;
-            IsBusy = false;
             OnExchangeCompleted();
+
+            // A sent message still holds the session; SendAsync ends the turn.
+            if (_sendCts is not null) return;
+
+            IsBusy = false;
+            TurnEnded?.Invoke();
             RequestScroll();
         });
     }
@@ -805,8 +813,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             _sendCts?.Dispose();
             _sendCts = null;
-            IsBusy = false;
-            TurnEnded?.Invoke();
+
+            // A turn the CLI started on its own may already be running; it
+            // keeps the session busy and ends the turn when it completes.
+            if (!_inUnsolicitedTurn)
+            {
+                IsBusy = false;
+                TurnEnded?.Invoke();
+            }
         }
         RequestScroll();
     }

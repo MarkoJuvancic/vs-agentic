@@ -252,11 +252,16 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     // Opens a turn for events that arrive while no SendMessageAsync call is
     // waiting, so they are rendered like any other answer.
+    //
+    // A sent turn stays _activeTurn after its result until SendMessageAsync
+    // gets to ClearActiveTurn, which waits for the caller on the UI thread.
+    // That turn is over, so a CLI-started turn replaces it; the late
+    // ClearActiveTurn then finds another turn and leaves it alone.
     private void BeginUnsolicitedTurnIfIdle()
     {
         lock (_activeTurnLock)
         {
-            if (_activeTurn != null || _discardUntilResult) return;
+            if (_activeTurn is { ResultReceived: false } || _discardUntilResult) return;
             _activeTurn = new TurnState { Unsolicited = true };
         }
 
@@ -658,12 +663,16 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         lock (_activeTurnLock)
         {
             turn = _activeTurn;
-            if (turn == null)
+            if (turn is not { ResultReceived: false })
             {
                 // End of a stopped turn: what follows is new again.
                 _discardUntilResult = false;
                 return;
             }
+
+            // Under the lock, so a Stop that comes after this point sees the
+            // result as taken and does not drop the next turn.
+            turn.ResultReceived = true;
         }
 
         FinalizeOpenBlocks(turn);
@@ -707,7 +716,6 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
 
         // Signal SendMessageAsync to return.
-        turn.ResultReceived = true;
         turn.TextDeltas.Writer.TryComplete();
 
         // No SendMessageAsync call is waiting on a turn the CLI started itself.
@@ -1384,8 +1392,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // True for a turn the CLI started on its own; no caller reads TextDeltas.
         public bool Unsolicited;
 
-        // Set by the dispatcher, read by SendMessageAsync after a cancel.
-        public volatile bool ResultReceived;
+        // Set when the dispatcher takes the result event, under _activeTurnLock.
+        // From then on the turn is over, even while it is still _activeTurn.
+        public bool ResultReceived;
 
         // Set when the CLI flags an assistant message as "authentication_failed".
         public bool AuthFailed;
