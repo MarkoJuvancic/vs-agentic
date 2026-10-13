@@ -792,7 +792,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             toolBody = FormatToolInput(toolName, input);
         }
 
-        turn.ToolItem = new OutputItem
+        var item = new OutputItem
         {
             Id = toolId,
             ToolName = toolName,
@@ -801,14 +801,44 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             Body = toolBody,
             ParentId = turn.ParentId
         };
-        _outputListener.OnStepStarted(turn.ToolItem);
+        _outputListener.OnStepStarted(item);
 
-        // Registered before the CLI starts the subagent, so its first message
-        // already finds where it goes.
         if (toolName == "Agent" && toolId.Length > 0)
+        {
+            // Not the open tool step: the next block would close that, and an
+            // Agent step has to stay open while its subagent runs, next to
+            // any other Agent step started in the same message. Its own
+            // tool_result closes it.
+            turn.OpenAgentSteps[toolId] = item;
+
+            // Registered before the CLI starts the subagent, so its first
+            // message already finds where it goes.
             _subagents[toolId] = new StepStream(toolId);
+        }
+        else
+        {
+            turn.ToolItem = item;
+        }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Closes an Agent step if <paramref name="block"/> is its tool_result.
+    /// That arrives when the subagent hands back, or at once for a subagent
+    /// sent to the background.
+    /// </summary>
+    private bool CloseAgentStep(StepStream stream, JsonElement block)
+    {
+        var toolUseId = block.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+        if (toolUseId is null || !stream.OpenAgentSteps.TryGetValue(toolUseId, out var item)) return false;
+
+        stream.OpenAgentSteps.Remove(toolUseId);
+        var isError = block.TryGetProperty("is_error", out var ep) && ep.ValueKind == JsonValueKind.True;
+        item.Status = isError ? OutputItemStatus.Error : OutputItemStatus.Success;
+        item.Delta = null;
+        _outputListener.OnStepCompleted(item);
+        return true;
     }
 
     /// <summary>
@@ -829,7 +859,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
 
         var turn = RunningTurn();
-        if (turn?.ToolItem == null) return;
+        if (turn == null) return;
 
         if (!evt.TryGetProperty("message", out var msg)) return;
         if (!msg.TryGetProperty("content", out var contentArr)) return;
@@ -839,6 +869,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             if (!block.TryGetProperty("type", out var bt)) continue;
             if (bt.GetString() != "tool_result") continue;
+            if (CloseAgentStep(turn, block)) continue;
             if (!block.TryGetProperty("is_error", out var ep)) continue;
             if (ep.ValueKind != JsonValueKind.True) continue;
 
@@ -861,7 +892,6 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// </summary>
     private void HandleSubagentToolResults(StepStream subagent, JsonElement evt)
     {
-        if (subagent.ToolItem == null) return;
         if (!evt.TryGetProperty("message", out var msg)) return;
         if (!msg.TryGetProperty("content", out var contentArr)) return;
         if (contentArr.ValueKind != JsonValueKind.Array) return;
@@ -869,6 +899,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         foreach (var block in contentArr.EnumerateArray())
         {
             if (!block.TryGetProperty("type", out var bt) || bt.GetString() != "tool_result") continue;
+            if (CloseAgentStep(subagent, block)) continue;
             var toolUseId = block.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
             if (subagent.ToolItem == null || toolUseId != subagent.ToolItem.Id) continue;
 
@@ -885,6 +916,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (!string.IsNullOrEmpty(toolUseId) && turn.SuppressedToolUseIds.Remove(toolUseId))
             return;
 
+        if (CloseAgentStep(turn, block)) return;
         if (turn.ToolItem == null) return;
         var content = block.TryGetProperty("content", out var cp) ? ExtractToolResultText(cp) : "";
 
@@ -1027,6 +1059,15 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         FinalizeThinkingItem(turn);
         FinalizeResponseItem(turn);
         FinalizeToolItem(turn);
+
+        // Agent steps whose tool_result never came: the turn was stopped.
+        foreach (var item in turn.OpenAgentSteps.Values)
+        {
+            item.Status = OutputItemStatus.Success;
+            item.Delta = null;
+            _outputListener.OnStepCompleted(item);
+        }
+        turn.OpenAgentSteps.Clear();
     }
 
     private void EmitFatalError(string body)
@@ -1637,6 +1678,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         public StringBuilder ResponseBuilder = new StringBuilder();
 
         public OutputItem? ToolItem;
+
+        // Agent steps waiting for their tool_result, by tool_use id. More
+        // than one when the model starts several subagents at once.
+        public Dictionary<string, OutputItem> OpenAgentSteps { get; } = new Dictionary<string, OutputItem>(StringComparer.Ordinal);
 
         // tool_use ids whose tool_result should be skipped (e.g. AskUserQuestion,
         // which we hide from the UI step list).
