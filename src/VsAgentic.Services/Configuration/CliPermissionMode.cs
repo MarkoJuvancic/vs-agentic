@@ -22,9 +22,10 @@ public enum CliPermissionMode
     AcceptEdits,
 
     /// <summary>
-    /// Auto-accept every gated tool call. The MCP permission helper is never
-    /// invoked, so no banners appear. Only use in trusted/sandboxed
-    /// environments — the agent can run arbitrary commands without confirmation.
+    /// Auto-accept every gated tool call. Only a call an <c>ask</c> rule in the
+    /// user's settings matches still reaches the MCP permission helper (CLI
+    /// 2.1.296). Only use in trusted/sandboxed environments — the agent can run
+    /// arbitrary commands without confirmation.
     /// </summary>
     BypassPermissions,
 
