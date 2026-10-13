@@ -152,9 +152,14 @@ internal static class StreamJsonProtocol
     /// Build the <c>initialize</c> request. It registers nothing: no hooks, no
     /// SDK MCP servers, no prompt changes. The point is the answer, which
     /// describes the process (see <see cref="CliProcessInfo"/>).
+    ///
+    /// <c>forwardSubagentText</c> asks for the text and thinking of subagents
+    /// as well; without it the CLI sends only their tool calls, and nothing
+    /// at all from a subagent that a subagent started. A CLI that predates the
+    /// field ignores it, which a command-line flag it does not know would not.
     /// </summary>
     public static string BuildInitialize(string requestId) =>
-        BuildControlRequest(requestId, "initialize");
+        BuildControlRequest(requestId, "initialize", w => w.WriteBoolean("forwardSubagentText", true));
 
     /// <summary>
     /// Build the <c>interrupt</c> request, which aborts the running turn.
