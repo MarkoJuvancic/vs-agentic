@@ -147,6 +147,15 @@ internal static class StreamJsonProtocol
         BuildControlRequest(requestId, "initialize");
 
     /// <summary>
+    /// Build the <c>interrupt</c> request, which aborts the running turn.
+    /// <c>cancel_queued</c> also drops the messages still waiting in the CLI's
+    /// queue, so Stop leaves nothing behind that would start on its own. A CLI
+    /// that predates the field ignores it.
+    /// </summary>
+    public static string BuildInterrupt(string requestId) =>
+        BuildControlRequest(requestId, "interrupt", w => w.WriteBoolean("cancel_queued", true));
+
+    /// <summary>
     /// Build the control request that changes the model and/or effort of the
     /// running process. A setting is sent only when its <c>include</c> flag is
     /// set; a null value then returns it to the CLI default.
