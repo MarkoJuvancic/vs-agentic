@@ -39,7 +39,7 @@ public class VsAgenticOptionsPage : DialogPage
 
     [Category("Claude CLI")]
     [DisplayName("Use Claude-configured MCP servers")]
-    [Description("False (default): the CLI loads only VsAgentic's own MCP server, which asks you before gated tools run. True: the CLI also loads the MCP servers from your Claude Code configuration (user settings, the project's .mcp.json, claude.ai connectors), and VsAgentic's server is added alongside them. Servers that do not connect are listed in the chat. Takes effect when Visual Studio restarts.")]
+    [Description("False (default): the CLI loads only VsAgentic's own MCP server, which asks you before gated tools run. True: the CLI also loads the MCP servers from your Claude Code configuration (user settings, the project's .mcp.json, claude.ai connectors), and VsAgentic's server is added alongside them. Servers that do not connect are listed in the chat. Applies to sessions started after the change.")]
     [DefaultValue(false)]
     public bool UseClaudeMcpServers { get; set; }
 
