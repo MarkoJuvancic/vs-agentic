@@ -5,6 +5,7 @@
     <UserControl.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/VsAgentic.VSExtension;component/ToolWindows/SharedStyles.xaml"/>
                 <ResourceDictionary Source="/VsAgentic.VSExtension;component/ToolWindows/Banners/BannerStyles.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>

@@ -5,13 +5,143 @@
              xmlns:imaging="clr-namespace:Microsoft.VisualStudio.Imaging;assembly=Microsoft.VisualStudio.Imaging"
              xmlns:catalog="clr-namespace:Microsoft.VisualStudio.Imaging;assembly=Microsoft.VisualStudio.ImageCatalog"
              xmlns:controls="clr-namespace:VsAgentic.UI.Controls;assembly=VsAgentic.UI"
+             xmlns:svc="clr-namespace:VsAgentic.Services.Abstractions;assembly=VsAgentic.Services"
              xmlns:bvm="clr-namespace:VsAgentic.UI.ViewModels.Banners;assembly=VsAgentic.UI"
              xmlns:bv="clr-namespace:VsAgentic.VSExtension.ToolWindows.Banners"
+             xmlns:local="clr-namespace:VsAgentic.VSExtension.ToolWindows"
              PreviewMouseWheel="OnPreviewMouseWheel"
              PreviewKeyDown="OnPreviewKeyDown" >
 
     <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/VsAgentic.VSExtension;component/ToolWindows/SharedStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <controls:AttachmentPreviewConverter x:Key="AttachmentPreviewConverter"/>
+        <controls:MinWidthVisibilityConverter x:Key="MinWidth"/>
+
+        <!-- Status bar pickers. Fully retemplated rather than merely unbordered:
+             the stock ComboBox chrome draws its own border, background and
+             focus ring, none of which BorderThickness="0" removes. What is left
+             is the label plus a chevron, with a hover fill borrowed from the
+             command bar so it still reads as clickable. -->
+        <Style x:Key="StatusComboStyle" TargetType="ComboBox">
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="Padding" Value="6,0"/>
+            <Setter Property="Height" Value="19"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground"
+                    Value="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <!-- Foreground is forwarded explicitly. ToggleButton's
+                                 own default style sets it to the system control
+                                 text colour, and a style setter beats an
+                                 inherited value, so without this local value the
+                                 label renders near-black on a dark theme no
+                                 matter what the ComboBox says. -->
+                            <ToggleButton x:Name="Toggle"
+                                          Focusable="False"
+                                          ClickMode="Press"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="Chrome"
+                                                Background="Transparent"
+                                                CornerRadius="3"
+                                                SnapsToDevicePixels="True">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <ContentPresenter Grid.Column="0"
+                                                                  Margin="6,0,2,0"
+                                                                  VerticalAlignment="Center"
+                                                                  Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                                  ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType=ComboBox}}"/>
+                                                <Path Grid.Column="1"
+                                                      Margin="0,1,6,0"
+                                                      VerticalAlignment="Center"
+                                                      Data="M 0 0 L 3.5 3.5 L 7 0 Z"
+                                                      Fill="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                                            </Grid>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Chrome" Property="Background"
+                                                        Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}"/>
+                                            </Trigger>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Chrome" Property="Background"
+                                                        Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseDownBackgroundGradientKey}}"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+
+                            <!-- Opens upwards: the status bar sits at the bottom
+                                 of the window, like the @-mention popup. -->
+                            <Popup IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   Placement="Top"
+                                   AllowsTransparency="True"
+                                   PopupAnimation="Fade"
+                                   Focusable="False">
+                                <Border Background="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBackgroundKey}}"
+                                        BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                                        BorderThickness="1"
+                                        CornerRadius="3"
+                                        MinWidth="{TemplateBinding ActualWidth}"
+                                        SnapsToDevicePixels="True">
+                                    <ItemsPresenter/>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <!-- Both pickers stay enabled while a turn is running. The
+                     change goes to the running CLI and applies from its next
+                     request, so it no longer kills the reply in flight. -->
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.5"/>
+                    <Setter Property="Cursor" Value="Arrow"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="StatusComboItemStyle" TargetType="ComboBoxItem">
+            <Setter Property="Padding" Value="8,3"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground"
+                    Value="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="ItemChrome"
+                                Background="Transparent"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="ItemChrome" Property="Background"
+                                        Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <!-- Zoom for everything that is not the WebView. One instance, shared
              by LayoutTransform on each docked child, so the code-behind moves
@@ -21,6 +151,65 @@
              of pushing it. The chat itself is scaled through the browser's own
              zoom, which stays crisp where a bitmap scale would not. -->
         <ScaleTransform x:Key="ChromeZoom" ScaleX="1" ScaleY="1"/>
+
+        <!-- Attachment chips above the input box. An image shows a thumbnail; a
+             file has nothing worth previewing, so it shows its name instead.
+             The tooltip is the path both came from, and stays away on a
+             screenshot, which came from no file. -->
+        <DataTemplate DataType="{x:Type svc:ChatImageAttachment}">
+            <Border Margin="0,0,6,6"
+                    BorderThickness="1"
+                    CornerRadius="3"
+                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                    ToolTip="{Binding SourcePath}">
+                <Grid>
+                    <Image Source="{Binding Converter={StaticResource AttachmentPreviewConverter}}"
+                           Height="56"
+                           Stretch="Uniform"
+                           Margin="2"/>
+                    <Button Content="&#xE10A;"
+                            FontFamily="Segoe MDL2 Assets"
+                            FontSize="9"
+                            Width="16" Height="16"
+                            Padding="0"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Top"
+                            ToolTip="Remove image"
+                            Click="RemoveAttachment_Click"/>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <DataTemplate DataType="{x:Type svc:ChatFileAttachment}">
+            <Border Margin="0,0,6,6"
+                    BorderThickness="1"
+                    CornerRadius="3"
+                    Padding="6,3"
+                    VerticalAlignment="Top"
+                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                    ToolTip="{Binding SourcePath}">
+                <StackPanel Orientation="Horizontal">
+                    <imaging:CrispImage Width="14" Height="14"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0"
+                                        Moniker="{x:Static catalog:KnownMonikers.Document}"/>
+                    <TextBlock Text="{Binding DisplayName}"
+                               VerticalAlignment="Center"
+                               MaxWidth="220"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+                    <Button Content="&#xE10A;"
+                            FontFamily="Segoe MDL2 Assets"
+                            FontSize="9"
+                            Width="16" Height="16"
+                            Padding="0"
+                            Margin="6,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="Remove file"
+                            Click="RemoveAttachment_Click"/>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
 
         <!-- Banner DataTemplates: ContentControl below picks the right view by VM type. -->
         <DataTemplate DataType="{x:Type bvm:PermissionBannerViewModel}">
@@ -117,6 +306,7 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        </ResourceDictionary>
     </UserControl.Resources>
 
     <DockPanel x:Name="RootPanel"
@@ -144,21 +334,56 @@
                         MouseLeftButtonUp="ResizeGrip_MouseLeftButtonUp"
                         ToolTip="Drag to resize input"/>
 
-                <!-- Rounded input container holding the textbox + status bar -->
-                <Border Grid.Row="1"
+                <!-- Rounded input container holding the textbox + status bar.
+
+                     The whole box takes a drop, not just the textbox: the strip
+                     of attachments and the status bar are part of what the user
+                     aims at, and a file dropped on either belongs to the same
+                     message. Only a file drop is taken here; text dragged out of
+                     an editor falls through to the textbox, which inserts it. -->
+                <Border x:Name="PromptBox"
+                        Grid.Row="1"
                         CornerRadius="4"
                         Background="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBackgroundKey}}"
                         BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
                         BorderThickness="1"
-                        SnapsToDevicePixels="True">
+                        SnapsToDevicePixels="True"
+                        AllowDrop="True"
+                        PreviewDragOver="PromptBox_PreviewDragOver"
+                        PreviewDragLeave="PromptBox_PreviewDragLeave"
+                        PreviewDrop="PromptBox_PreviewDrop">
                     <Grid>
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
+                        <!-- Pasted images and files waiting to go out with the next
+                             message. The template per attachment kind is picked up
+                             from the resources by DataType. -->
+                        <ItemsControl Grid.Row="0"
+                                      ItemsSource="{Binding PendingAttachments}"
+                                      Margin="8,6,8,0">
+                            <ItemsControl.Style>
+                                <Style TargetType="ItemsControl">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding PendingAttachments.Count}" Value="0">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ItemsControl.Style>
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+
                         <!-- Text input + placeholder overlay -->
-                        <Grid Grid.Row="0">
+                        <Grid Grid.Row="1">
                             <TextBox x:Name="InputTextBox"
                                      Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                                      Background="Transparent"
@@ -245,7 +470,7 @@
                         </Grid>
 
                         <!-- Status bar (separated from textbox by a top line) -->
-                        <Border Grid.Row="1"
+                        <Border Grid.Row="2"
                                 BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
                                 BorderThickness="0,1,0,0">
                             <Grid>
@@ -255,26 +480,138 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
 
-                                <!-- @-mention attach button: opens the file/folder picker popup -->
-                                <Button Grid.Column="0"
-                                        x:Name="AtMentionButton"
-                                        Style="{StaticResource IconButtonStyle}"
-                                        Click="AtMentionButton_Click"
-                                        ToolTip="Insert file or folder reference (@)">
-                                    <TextBlock Text="@"
-                                               FontSize="13"
-                                               FontWeight="Bold"
-                                               Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
-                                </Button>
+                                <!-- Left of the status readings: the two ways of
+                                     putting a file into the next message. They are
+                                     not the same thing. @ writes a reference into
+                                     the text and only reaches the workspace; the
+                                     paperclip attaches a file from anywhere, and an
+                                     image attached this way travels inline. -->
+                                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                    <!-- @-mention attach button: opens the file/folder picker popup -->
+                                    <Button x:Name="AtMentionButton"
+                                            Style="{StaticResource IconButtonStyle}"
+                                            Click="AtMentionButton_Click"
+                                            ToolTip="Insert file or folder reference (@)">
+                                        <TextBlock Text="@"
+                                                   FontSize="13"
+                                                   FontWeight="Bold"
+                                                   Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+                                    </Button>
 
-                                <!-- Status info area (reserved for future) -->
-                                <TextBlock Grid.Column="1"
-                                           x:Name="StatusInfoText"
-                                           VerticalAlignment="Center"
-                                           Margin="10,0"
-                                           FontSize="11"
-                                           Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"
-                                           TextTrimming="CharacterEllipsis"/>
+                                    <Button x:Name="AttachFileButton"
+                                            Style="{StaticResource IconButtonStyle}"
+                                            Click="AttachFileButton_Click"
+                                            ToolTip="Attach files to the next message.&#x0a;Images go inline; anything else is sent as a path.">
+                                        <imaging:CrispImage Width="16" Height="16"
+                                                            Moniker="{x:Static catalog:KnownMonikers.AddAttachment}"/>
+                                    </Button>
+                                </StackPanel>
+
+                                <!-- Status info: usage readings and the model /
+                                     effort pickers, right-aligned towards Send.
+
+                                     Each item names the cell width it needs and
+                                     drops out below it. Context is the last to go:
+                                     it is ambient, and hidden it cannot warn that a
+                                     compaction is near. The pickers go first: they
+                                     are occasional actions, reachable again by
+                                     widening the pane or through Tools → Options.
+
+                                     The thresholds are cumulative estimates of the
+                                     items' widths, in unzoomed pixels. The cell is
+                                     inside the zoomed chrome, so its ActualWidth
+                                     shrinks with zoom and the same numbers hold.
+                                     ClipToBounds keeps an overflow off the @ button. -->
+                                <Grid Grid.Column="1"
+                                      x:Name="StatusInfo"
+                                      Margin="6,0"
+                                      ClipToBounds="True">
+                                    <StackPanel Orientation="Horizontal"
+                                                HorizontalAlignment="Right"
+                                                VerticalAlignment="Center">
+
+                                        <!-- The 5h and 7d budgets are estimates, so
+                                             these are plain text: a bar would claim a
+                                             precision the numbers do not have. -->
+                                        <StackPanel Orientation="Horizontal"
+                                                    Visibility="{Binding HasWindowMeters, Converter={StaticResource BoolToVis}}">
+                                            <local:UsageMeter Caption="7d"
+                                                              ValueText="{Binding LongWindowDisplay}"
+                                                              ShowBar="False"
+                                                              ToolTip="{Binding LongWindowTooltip}"
+                                                              Visibility="{Binding ActualWidth, ElementName=StatusInfo,
+                                                                           Converter={StaticResource MinWidth},
+                                                                           ConverterParameter=255}"/>
+                                            <local:UsageMeter Caption="5h"
+                                                              ValueText="{Binding ShortWindowDisplay}"
+                                                              ShowBar="False"
+                                                              ToolTip="{Binding ShortWindowTooltip}"
+                                                              Visibility="{Binding ActualWidth, ElementName=StatusInfo,
+                                                                           Converter={StaticResource MinWidth},
+                                                                           ConverterParameter=170}"/>
+                                        </StackPanel>
+
+                                        <local:UsageMeter Caption="Session"
+                                                          ValueText="{Binding SessionTokensDisplay}"
+                                                          ShowBar="False"
+                                                          ToolTip="{Binding SessionTokensTooltip}"
+                                                          Visibility="{Binding ActualWidth, ElementName=StatusInfo,
+                                                                       Converter={StaticResource MinWidth},
+                                                                       ConverterParameter=325}"/>
+
+                                        <!-- The one bar: the context ceiling is real,
+                                             derived from the model id. -->
+                                        <local:UsageMeter ValueText="{Binding ContextDisplay}"
+                                                          Fraction="{Binding ContextFraction}"
+                                                          Level="{Binding ContextLevel}"
+                                                          ToolTip="{Binding ContextTooltip}"/>
+
+                                        <!-- Changing either picker goes to the running
+                                             CLI process, which applies it from its next
+                                             API request. An older CLI that cannot take
+                                             it restarts before the next message; the
+                                             conversation is resumed, not lost.
+
+                                             An ItemTemplate, not DisplayMemberPath:
+                                             the Default row renames itself once the
+                                             model is known, and StatusComboStyle only
+                                             forwards SelectionBoxItemTemplate. With
+                                             DisplayMemberPath that is null, so the
+                                             closed box would draw ToString() once and
+                                             keep showing "Default". -->
+                                        <ComboBox Style="{StaticResource StatusComboStyle}"
+                                                  ItemContainerStyle="{StaticResource StatusComboItemStyle}"
+                                                  ItemsSource="{Binding ModelOptions}"
+                                                  SelectedItem="{Binding SelectedModel}"
+                                                  Visibility="{Binding ActualWidth, ElementName=StatusInfo,
+                                                               Converter={StaticResource MinWidth},
+                                                               ConverterParameter=405}">
+                                            <!-- A TextBlock, not ToolTip="{Binding ...
+                                                 StringFormat=...}": the ToolTip property
+                                                 is typed object, so the binding has no
+                                                 target type to format to and the tooltip
+                                                 reads as the bare model name. -->
+                                            <ComboBox.ToolTip>
+                                                <TextBlock Text="{Binding ModelDisplay,
+                                                           StringFormat='Model: {0}&#x0a;Takes effect on the next request, also during a reply.'}"/>
+                                            </ComboBox.ToolTip>
+                                            <ComboBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding DisplayName}"/>
+                                                </DataTemplate>
+                                            </ComboBox.ItemTemplate>
+                                        </ComboBox>
+
+                                        <ComboBox Style="{StaticResource StatusComboStyle}"
+                                                  ItemContainerStyle="{StaticResource StatusComboItemStyle}"
+                                                  ItemsSource="{Binding EffortOptions}"
+                                                  SelectedItem="{Binding SelectedEffort}"
+                                                  ToolTip="Reasoning effort. Default sends no level to the CLI.&#x0a;Takes effect on the next request, also during a reply."
+                                                  Visibility="{Binding ActualWidth, ElementName=StatusInfo,
+                                                               Converter={StaticResource MinWidth},
+                                                               ConverterParameter=480}"/>
+                                    </StackPanel>
+                                </Grid>
 
                                 <!-- Send / Stop buttons -->
                                 <Grid Grid.Column="2" Margin="2">
@@ -293,6 +630,18 @@
                                 </Grid>
                             </Grid>
                         </Border>
+
+                        <!-- Shown while a file is dragged over the box. An overlay
+                             rather than a colour on the container itself: setting
+                             BorderBrush from code would replace the themed brush
+                             with a local value and keep it after the drop. -->
+                        <Border x:Name="DropHighlight"
+                                Grid.Row="0" Grid.RowSpan="3"
+                                CornerRadius="4"
+                                BorderThickness="2"
+                                BorderBrush="{DynamicResource {x:Static vs:VsBrushes.HighlightKey}}"
+                                IsHitTestVisible="False"
+                                Visibility="Collapsed"/>
                     </Grid>
                 </Border>
             </Grid>
@@ -304,9 +653,48 @@
                 Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
                 Padding="16,4"
                 Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
-            <TextBlock Text="Thinking..."
+            <TextBlock Text="{Binding BusyStatus}"
+                       TextTrimming="CharacterEllipsis"
                        Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"
                        FontSize="12" FontStyle="Italic"/>
+        </Border>
+
+        <!-- Background tasks: commands started with run_in_background. They
+             outlive the turn, so this strip stays up between turns until the
+             CLI reports them done. The pulse uses opacity only, so it needs no
+             accent color from the theme. -->
+        <Border DockPanel.Dock="Bottom"
+                LayoutTransform="{StaticResource ChromeZoom}"
+                Margin="6,4,6,0"
+                Padding="8,4"
+                CornerRadius="4"
+                BorderThickness="1"
+                BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}"
+                Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
+                ToolTip="{Binding BackgroundTasksTooltip}"
+                Visibility="{Binding HasBackgroundTasks, Converter={StaticResource BoolToVis}}">
+            <DockPanel>
+                <Ellipse DockPanel.Dock="Left"
+                         Width="8" Height="8"
+                         Margin="0,0,8,0"
+                         VerticalAlignment="Center"
+                         Fill="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}">
+                    <Ellipse.Triggers>
+                        <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                    <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                     From="1" To="0.2" Duration="0:0:0.8"/>
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </Ellipse.Triggers>
+                </Ellipse>
+                <TextBlock Text="{Binding BackgroundTasksText}"
+                           TextTrimming="CharacterEllipsis"
+                           FontSize="12"
+                           Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+            </DockPanel>
         </Border>
 
         <!-- Banner host: permission / question / login banner. The DataTemplates
