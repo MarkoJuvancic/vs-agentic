@@ -435,9 +435,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         if (!reportOurs && newOthers.Count == 0 && newErrors.Count == 0) return;
 
+        var notConnected = (reportOurs ? new[] { ours } : Array.Empty<CliMcpServer>()).Concat(newOthers)
+            .Select(s => $"{s.Name} ({s.Status})")
+            .ToList();
         _logger.LogWarning("[ClaudeCli] MCP servers not connected: {Servers}; skipped configs: {Errors}",
-            string.Join(", ", (reportOurs ? new[] { ours } : Array.Empty<CliMcpServer>()).Concat(newOthers)
-                .Select(s => $"{s.Name} ({s.Status})")),
+            notConnected.Count == 0 ? "(none)" : string.Join(", ", notConnected),
             newErrors.Count == 0 ? "(none)" : string.Join(", ", newErrors.Select(e => e.Name)));
 
         // The reasons come only from mcp_status. Asked off the dispatcher,
