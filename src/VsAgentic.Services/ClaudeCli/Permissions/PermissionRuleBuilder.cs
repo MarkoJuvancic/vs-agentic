@@ -92,9 +92,9 @@ public static class PermissionRuleBuilder
 
         var rules = new List<PermissionRule>();
 
-        foreach (var segment in segments)
+        foreach (var (segment, piped) in segments)
         {
-            var content = CommandRule(segment, posix);
+            var content = CommandRule(segment, piped);
 
             // One command that cannot be read is enough to drop the button.
             // Keeping the other rules would not help: the CLI would go on asking
@@ -133,20 +133,26 @@ public static class PermissionRuleBuilder
     /// another. So anything that hides a command (a heredoc body, a
     /// substitution, a subshell), and anything that takes the meaning off a
     /// quote or a separator (an escape), gives up on the whole line instead.
+    ///
+    /// Each command comes with whether a pipe feeds it, because what a program
+    /// reads on its input can be the program it runs.
     /// </summary>
-    private static List<string>? SplitCommands(string command, bool posix)
+    private static List<(string Text, bool Piped)>? SplitCommands(string command, bool posix)
     {
         var escape = posix ? '\\' : '`';
-        var commands = new List<string>();
+        var commands = new List<(string Text, bool Piped)>();
         var current = new StringBuilder();
         var quote = '\0';
         var wordStart = true;
+        var piped = false;
 
-        void Flush()
+        bool Flush()
         {
             var s = current.ToString().Trim();
-            if (s.Length > 0) commands.Add(s);
             current.Clear();
+            if (s.Length == 0) return false;
+            commands.Add((s, piped));
+            return true;
         }
 
         for (var i = 0; i < command.Length; i++)
@@ -207,6 +213,11 @@ public static class PermissionRuleBuilder
             // sees an argument, and brace expansion multiplies the line.
             if (posix && c == '`') return null;
             if (c == '$' && (next == '(' || next == '{')) return null;
+
+            // Bash reads escapes inside $'…' that this loop does not, so the
+            // string can end somewhere else than it seems to: cat $'a\' ; rm x'
+            // runs cat alone. $"…" is the same kind of string with translation.
+            if (c == '$' && (next == '\'' || next == '"')) return null;
             if (c == '(' || c == ')' || c == '{' || c == '}') return null;
 
             // A heredoc turns the rest of the line and the lines after it into
@@ -229,6 +240,7 @@ public static class PermissionRuleBuilder
                 if (next == '&')
                 {
                     Flush();
+                    piped = false;
                     i++;
                     wordStart = true;
                     continue;
@@ -249,10 +261,28 @@ public static class PermissionRuleBuilder
                 return null;
             }
 
-            if (c == ';' || c == '|' || c == '\n' || c == '\r')
+            if (c == '|')
             {
                 Flush();
-                if (c == '|' && next == '|') i++;
+                if (next == '|')
+                {
+                    piped = false;
+                    i++;
+                }
+                else
+                {
+                    piped = true;
+                }
+
+                wordStart = true;
+                continue;
+            }
+
+            if (c == ';' || c == '\n' || c == '\r')
+            {
+                // A pipe at the end of a line carries on into the next one, so
+                // a line break with no command before it keeps the pipe.
+                if (Flush() || c == ';') piped = false;
                 wordStart = true;
                 continue;
             }
@@ -273,7 +303,7 @@ public static class PermissionRuleBuilder
     /// The rule content for one command, or null when the command gives nothing
     /// that can be keyed on without covering more than it says.
     /// </summary>
-    private static string? CommandRule(string segment, bool posix)
+    private static string? CommandRule(string segment, bool piped)
     {
         var words = SplitWords(segment);
         if (words.Count == 0) return null;
@@ -298,26 +328,38 @@ public static class PermissionRuleBuilder
         // on a value instead of a command — Bash(R="R:/3:*) is the real example.
         if (head.IndexOf('=') >= 0) return null;
 
+        // The lists below hold program names, and python.exe, npx.cmd or a full
+        // path in quotes are the same programs under another spelling.
         var quoted = QuotedProgram(head);
-        if (quoted is not null)
+        string name;
+        if (quoted is not null) name = ExecutableLeaf(quoted.Substring(1, quoted.Length - 2));
+        else if (IsCommandName(head)) name = ExecutableLeaf(head);
+        else return null;
+
+        if (RunsOtherCode(name, words))
         {
-            // A program named by full path is specific on its own, so no
-            // subcommand is collected. The quotes stay in the rule, because the
-            // CLI compares against the command as written.
-            var leaf = ExecutableLeaf(quoted.Substring(1, quoted.Length - 2));
-            return ExactRuleOnly.Contains(leaf) ? ExactRule(segment) : quoted + ":*";
+            // Such a program runs whatever its arguments or its input say. A
+            // rule for the exact command is the most it can get, and not even
+            // that when the code comes from its input: Bash(sh) approved after
+            // curl … | sh would also cover a later cat evil.sh | sh, because
+            // the CLI checks each command of a pipe on its own.
+            if (piped || ReadsCodeFromInput(words)) return null;
+            return ExactRule(segment);
         }
 
-        if (!IsCommandName(head)) return null;
+        // A program named by full path is specific on its own, so no subcommand
+        // is collected. The quotes stay in the rule, because the CLI compares
+        // against the command as written.
+        if (quoted is not null)
+            return WritesByPath.Contains(name) ? ExactRule(segment) : quoted + ":*";
 
         // Read-only commands take no subcommand: cd src would otherwise yield
         // Bash(cd src:*), which never matches the next cd. The list is held to
         // commands that only read, so the widest thing a rule from it can allow
         // is a read.
-        if (ReadOnlyCommands.Contains(head)) return head + ":*";
+        if (ReadOnlyCommands.Contains(name)) return head + ":*";
 
-        // Some commands never get a prefix rule at all. See the list.
-        if (ExactRuleOnly.Contains(head)) return ExactRule(segment);
+        if (WritesByPath.Contains(name)) return ExactRule(segment);
 
         // git log --oneline -5 keys on "git log". One subcommand, not two: two
         // looks right on gh issue list but misreads git ls-tree main, where the
@@ -464,6 +506,43 @@ public static class PermissionRuleBuilder
     }
 
     /// <summary>
+    /// Whether the command runs code it was handed rather than doing one thing
+    /// of its own: a shell, an interpreter, a wrapper, a package runner, or a
+    /// tool whose subcommand is a runner (<c>npm exec</c>, <c>docker run</c>).
+    /// </summary>
+    private static bool RunsOtherCode(string name, List<string> words) =>
+        CodeFromInput.Contains(name) ||
+        Wrappers.Contains(name) ||
+        (words.Count >= 2 && RunnerSubcommands.Contains(name + " " + words[1]));
+
+    /// <summary>
+    /// Whether a program in the command may take the code it runs from its
+    /// input: xargs always does, and a shell or interpreter does when nothing
+    /// after it names a script or a command (<c>sh</c>, <c>env python</c>,
+    /// <c>pwsh -NoProfile</c>), or when it is told to (<c>bash -s</c>,
+    /// <c>python -</c>). Every word is checked, not only the first, because a
+    /// wrapper puts the program somewhere further along.
+    /// </summary>
+    private static bool ReadsCodeFromInput(List<string> words)
+    {
+        for (var i = 0; i < words.Count; i++)
+        {
+            var name = ExecutableLeaf(Unquote(words[i]));
+            if (name.Equals("xargs", StringComparison.OrdinalIgnoreCase)) return true;
+            if (!CodeFromInput.Contains(name)) continue;
+
+            var rest = words.Skip(i + 1).ToList();
+            if (rest.All(w => w.StartsWith("-", StringComparison.Ordinal))) return true;
+            if (rest.Any(w => w == "-" || w == "-s")) return true;
+        }
+
+        return false;
+    }
+
+    private static string Unquote(string word) =>
+        QuotedProgram(word) is { } quoted ? quoted.Substring(1, quoted.Length - 2) : word;
+
+    /// <summary>
     /// Whether the command sends its output into a file. <c>2&gt;&amp;1</c> and
     /// <c>&gt;&amp;2</c> point one handle at another and write nothing, so they
     /// do not count: the compound line in the issue ends in
@@ -506,7 +585,7 @@ public static class PermissionRuleBuilder
     private static readonly HashSet<string> ReadOnlyCommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "cd", "ls", "dir", "pwd", "cat", "head", "tail", "wc", "grep",
-        "which", "where", "tree", "stat",
+        "which", "where", "stat",
 
         // The same commands under their PowerShell names. ls, cat and pwd are
         // aliases of these three, so leaving them out would make the rule depend
@@ -515,36 +594,69 @@ public static class PermissionRuleBuilder
     };
 
     /// <summary>
-    /// Commands that never get a prefix rule, for one of two reasons.
-    ///
-    /// A shell, interpreter, wrapper or package runner takes the command it runs
-    /// from its own arguments, so a prefix rule on one of them is a rule for
-    /// "run anything".
-    ///
-    /// A command that writes or deletes takes a path where another command takes
-    /// a subcommand, and a prefix rule would reach past that one path: approving
-    /// <c>rm old</c> would also allow <c>rm older-and-still-needed</c>.
+    /// Shells and interpreters. They take the code they run from their
+    /// arguments, or from their input when the arguments do not name any, so a
+    /// prefix rule on one of them is a rule for "run anything".
     /// </summary>
-    private static readonly HashSet<string> ExactRuleOnly = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> CodeFromInput = new(StringComparer.OrdinalIgnoreCase)
     {
         // Shells
         "bash", "sh", "zsh", "dash", "ksh", "csh", "fish",
-        "cmd", "command", "powershell", "pwsh", "wsl",
+        "cmd", "powershell", "pwsh", "wsl",
 
         // Interpreters
         "python", "python2", "python3", "py", "node", "nodejs", "deno", "bun",
         "perl", "ruby", "php", "osascript",
 
-        // Wrappers, and anything that hands its tail to another program
+        // PowerShell's eval, which reads the pipe as well as its argument
+        "Invoke-Expression", "iex",
+    };
+
+    /// <summary>
+    /// Programs that hand their tail to another program: wrappers and package
+    /// runners. A prefix rule on one of them covers whatever it is asked to run.
+    /// </summary>
+    private static readonly HashSet<string> Wrappers = new(StringComparer.OrdinalIgnoreCase)
+    {
         "env", "xargs", "sudo", "doas", "su", "timeout", "nohup", "time", "nice",
-        "stdbuf", "watch", "start", "ssh", "eval", "exec", "source",
+        "stdbuf", "watch", "start", "ssh", "eval", "exec", "source", "command",
+
+        // The same in PowerShell
+        "Start-Process", "saps", "Invoke-Command", "icm", "Start-Job",
 
         // Package runners
         "npx", "pnpx", "bunx", "uvx", "pipx",
+    };
 
-        // Write, delete, or run a command of their own over what they find
+    /// <summary>
+    /// Subcommands that make an ordinary tool a runner: <c>npm exec x</c> runs
+    /// whatever x is, just as <c>npx x</c> does. Keyed on the program name and
+    /// the subcommand, so <c>npm install</c> still gets <c>npm install:*</c>.
+    /// </summary>
+    private static readonly HashSet<string> RunnerSubcommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "npm exec", "npm x", "pnpm exec", "pnpm dlx", "yarn exec", "yarn dlx",
+        "uv run", "uv tool", "dotnet exec", "docker run", "docker exec",
+        "podman run", "podman exec", "go run",
+    };
+
+    /// <summary>
+    /// Commands that write or delete and take a path where another command takes
+    /// a subcommand. A prefix rule would reach past that one path: approving
+    /// <c>rm old</c> would also allow <c>rm older-and-still-needed</c>. find,
+    /// sed and awk are here because they can run a command of their own over
+    /// what they find, and tree because <c>tree -o file</c> writes a file
+    /// without a redirection.
+    /// </summary>
+    private static readonly HashSet<string> WritesByPath = new(StringComparer.OrdinalIgnoreCase)
+    {
         "rm", "rmdir", "mv", "cp", "chmod", "chown", "touch", "mkdir",
-        "find", "sed", "awk",
+        "find", "sed", "awk", "tree",
+
+        // The same in PowerShell and cmd, with the aliases PowerShell defines
+        "Remove-Item", "ri", "del", "erase", "rd", "Move-Item", "mi", "move",
+        "Copy-Item", "cpi", "copy", "Rename-Item", "rni", "ren", "New-Item", "ni",
+        "md", "Set-Content", "Add-Content", "Clear-Content", "Out-File",
     };
 
     /// <summary>
