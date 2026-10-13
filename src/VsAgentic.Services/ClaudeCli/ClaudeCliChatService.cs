@@ -175,7 +175,15 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             yield break;
         }
 
-        var turn = new TurnState();
+        // A CLI that reports message lifecycles may be busy with a turn of its
+        // own (after a background task ends, say) and queue this message
+        // behind it. The turn then counts as ours only from the lifecycle's
+        // "started". The capabilities are empty on a fresh process, which has
+        // no turn of its own running, and on an older CLI, which sends no
+        // lifecycle. In both cases the turn starts at once, as before.
+        var turn = new TurnState(
+            Guid.NewGuid().ToString(),
+            startedAtOnce: !_capabilities.Has(CliCapabilities.MessageLifecycle));
         lock (_activeTurnLock)
         {
             _activeTurn = turn;
@@ -185,8 +193,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         try
         {
             var line = images is { Count: > 0 }
-                ? StreamJsonProtocol.BuildUserMessageWithImages(userMessage, images)
-                : StreamJsonProtocol.BuildUserTextMessage(userMessage);
+                ? StreamJsonProtocol.BuildUserMessageWithImages(userMessage, images, turn.MessageUuid)
+                : StreamJsonProtocol.BuildUserTextMessage(userMessage, turn.MessageUuid);
             await _host.WriteLineAsync(line, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -374,7 +382,81 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 if (!_control.TryComplete(evt))
                     _logger.LogDebug("[ClaudeCli] control_response for a request no one waits for");
                 return;
+
+            case "command_lifecycle":
+                HandleCommandLifecycle(evt);
+                return;
         }
+    }
+
+    /// <summary>
+    /// The turn that events from the CLI belong to: the active turn, once the
+    /// CLI has started it. Null while our message still waits in the CLI's
+    /// queue behind a turn the CLI started itself; that turn's events are not
+    /// ours to show.
+    /// </summary>
+    private TurnState? RunningTurn()
+    {
+        lock (_activeTurnLock)
+            return _activeTurn is { Started: true } turn ? turn : null;
+    }
+
+    /// <summary>
+    /// Follows our message through the CLI's queue. The CLI reports each
+    /// message that carries a uuid as queued, started, then completed or
+    /// cancelled. Lifecycles of other messages (the CLI's own) are ignored.
+    /// </summary>
+    private void HandleCommandLifecycle(JsonElement evt)
+    {
+        var uuid = CliProcessInfo.ReadString(evt, "command_uuid");
+        var state = CliProcessInfo.ReadString(evt, "state");
+
+        TurnState? turn;
+        lock (_activeTurnLock) { turn = _activeTurn; }
+        if (turn is null || uuid != turn.MessageUuid) return;
+
+        switch (state)
+        {
+            case "started":
+                if (!turn.Started)
+                    _logger.LogInformation("[ClaudeCli] Queued message started");
+                turn.Started = true;
+                return;
+
+            case "cancelled":
+                // A message cancelled while still queued gets no result, so
+                // nothing else would end the turn. One cancelled while running
+                // has had its result already; End is then a no-op.
+                if (!turn.Ended.Task.IsCompleted)
+                {
+                    _logger.LogInformation("[ClaudeCli] Message cancelled before its turn ended");
+                    FinalizeOpenBlocks(turn);
+                    turn.End();
+                }
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Whether a result closes <paramref name="turn"/>. The CLI lists the
+    /// messages a turn answered in <c>user_message_uuids</c>; a turn it
+    /// started on its own carries an <c>origin</c> other than "human" and no
+    /// uuids. A result with neither comes from a CLI that predates both and
+    /// is taken as ours, as before.
+    /// </summary>
+    private static bool ResultBelongsTo(JsonElement evt, TurnState turn)
+    {
+        if (evt.TryGetProperty("user_message_uuids", out var uuids) && uuids.ValueKind == JsonValueKind.Array)
+            return uuids.EnumerateArray().Any(u => u.ValueKind == JsonValueKind.String && u.GetString() == turn.MessageUuid);
+
+        var single = CliProcessInfo.ReadString(evt, "user_message_uuid");
+        if (single is not null)
+            return single == turn.MessageUuid;
+
+        if (evt.TryGetProperty("origin", out var origin) && origin.ValueKind == JsonValueKind.Object)
+            return CliProcessInfo.ReadString(origin, "kind") is null or "human";
+
+        return true;
     }
 
     /// <summary>
@@ -461,8 +543,20 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     private async Task HandleAssistantEventAsync(JsonElement evt)
     {
-        TurnState? turn;
-        lock (_activeTurnLock) { turn = _activeTurn; }
+        // The first assistant message of a turn names the user message it
+        // answers. That starts a queued turn as well, should its "started"
+        // lifecycle event go missing.
+        var answers = CliProcessInfo.ReadString(evt, "user_message_uuid");
+        if (answers is not null)
+        {
+            lock (_activeTurnLock)
+            {
+                if (_activeTurn is { } active && active.MessageUuid == answers)
+                    active.Started = true;
+            }
+        }
+
+        var turn = RunningTurn();
         if (turn == null) return;
 
         if (!evt.TryGetProperty("message", out var msg)) return;
@@ -619,8 +713,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// </summary>
     private void HandleUserEvent(JsonElement evt)
     {
-        TurnState? turn;
-        lock (_activeTurnLock) { turn = _activeTurn; }
+        var turn = RunningTurn();
         if (turn?.ToolItem == null) return;
 
         if (!evt.TryGetProperty("message", out var msg)) return;
@@ -672,6 +765,16 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         TurnState? turn;
         lock (_activeTurnLock) { turn = _activeTurn; }
         if (turn == null) return;
+
+        // A result for another message, or for a turn the CLI started itself,
+        // must not end ours: our reply would then arrive after the call had
+        // returned, and be lost.
+        if (!ResultBelongsTo(evt, turn))
+        {
+            _logger.LogInformation("[ClaudeCli] Result of another turn ({Origin}); waiting for ours",
+                evt.TryGetProperty("origin", out var o) ? CliProcessInfo.ReadString(o, "kind") ?? "unknown" : "no origin");
+            return;
+        }
 
         FinalizeOpenBlocks(turn);
 
@@ -1363,6 +1466,20 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// <summary>State for one in-flight turn.</summary>
     private sealed class TurnState
     {
+        public TurnState(string messageUuid, bool startedAtOnce)
+        {
+            MessageUuid = messageUuid;
+            Started = startedAtOnce;
+        }
+
+        // The uuid our user message carried. The CLI names it in the
+        // message's lifecycle events and in the result of the turn.
+        public string MessageUuid { get; }
+
+        // False while the message waits in the CLI's queue behind a turn the
+        // CLI started itself. Events are routed to this turn only once true.
+        public volatile bool Started;
+
         public OutputItem? ThinkingItem;
         public StringBuilder ThinkingBuilder = new StringBuilder();
         public DateTime? ThinkingStartTime;
