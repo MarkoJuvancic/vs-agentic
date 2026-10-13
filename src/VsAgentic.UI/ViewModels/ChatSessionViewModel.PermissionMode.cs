@@ -67,8 +67,11 @@ public partial class ChatSessionViewModel
         var mode = _chatService.PermissionMode;
         ReportedPermissionMode = _chatService.ReportedPermissionMode;
 
+        // Only while that row is selected: with another mode picked, the mode
+        // in force says nothing about what the CLI setting would give, and the
+        // row has to stay findable as "CLI setting".
         var cliRow = PermissionModeOptions.First(o => o.Mode == CliPermissionMode.CliSetting);
-        cliRow.DisplayName = ReportedPermissionMode is { } reported
+        cliRow.DisplayName = mode == CliPermissionMode.CliSetting && ReportedPermissionMode is { } reported
             ? $"{PermissionModeOption.LabelFor(reported)} (CLI)"
             : PermissionModeOption.LabelFor(CliPermissionMode.CliSetting);
 
