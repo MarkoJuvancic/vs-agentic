@@ -153,7 +153,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 _restartBeforeNextMessage = false;
                 _host.Stop();
                 lock (_dispatcherLock) { _dispatcherTask = null; }
-                _logger.LogInformation("[ClaudeCli] Restarting CLI to apply a model/effort change");
+                _permissionRestartPending = false;
+                _logger.LogInformation("[ClaudeCli] Restarting CLI to apply a settings change");
             }
 
             var wasRunning = _host.IsRunning;
@@ -314,6 +315,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _logger.LogInformation(
             "[ClaudeCli] CLI {Version}: {Models} models, {Commands} commands",
             info.Version ?? "(version unknown)", info.Models.Count, info.Commands.Count);
+
+        // The first report of the mode, before any turn has run.
+        SetReportedPermissionMode(info.PermissionMode);
     }
 
     private async Task DispatchEventAsync(JsonElement evt)
@@ -365,6 +369,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             case "background_tasks_changed":
                 HandleBackgroundTasksChanged(evt);
                 return;
+
+            case "status":
+                // Also carries other state (compacting); only some carry the mode.
+                // Sent after every mode change, whoever made it.
+                SetReportedPermissionMode(CliProcessInfo.ReadString(evt, "permissionMode"));
+                return;
         }
     }
 
@@ -390,6 +400,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // every change.
         if (init.Model is not null)
             SetCurrentModel(init.Model);
+
+        SetReportedPermissionMode(init.PermissionMode);
 
         // Diagnostic: dump the available tool names so we can verify whether
         // AskUserQuestion is registered in headless mode.
@@ -1209,6 +1221,176 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             error);
     }
 
+    // ── Permission mode ───────────────────────────────────────────────────
+    // The requested mode lives in _options.CliPermissionMode, which also feeds
+    // the start-up flag. The reported mode is what the CLI last said is in
+    // force. Both change from the UI thread and the dispatcher, hence the lock.
+
+    private readonly object _permissionLock = new object();
+    private string? _reportedPermissionMode;
+
+    // Set while a set_permission_mode request is unanswered. A report that
+    // arrives meanwhile can still describe the old mode, so the requested
+    // mode does not follow it.
+    private int _permissionRequestsInFlight;
+
+    // Set when the mode can only change with a restart, which the next
+    // message does. Reports from the old process no longer apply.
+    private volatile bool _permissionRestartPending;
+
+    public CliPermissionMode PermissionMode
+    {
+        get { lock (_permissionLock) return _options.CliPermissionMode; }
+    }
+
+    public string? ReportedPermissionMode
+    {
+        get { lock (_permissionLock) return _reportedPermissionMode; }
+    }
+
+    public event Action? PermissionModeChanged;
+
+    public event Action<string>? PermissionModeRejected;
+
+    public void ApplyPermissionMode(CliPermissionMode mode)
+    {
+        CliPermissionMode previous;
+        lock (_permissionLock)
+        {
+            previous = _options.CliPermissionMode;
+            if (previous == mode) return;
+            _options.CliPermissionMode = mode;
+        }
+
+        if (!_host.IsRunning || _permissionRestartPending)
+        {
+            // The start-up flag carries it, or the restart that is already due.
+            _logger.LogInformation("[ClaudeCli] Permission mode set to {Mode}; applies when the CLI starts", mode);
+            RaisePermissionModeChanged();
+            return;
+        }
+
+        if (mode == CliPermissionMode.CliSetting)
+        {
+            // No request returns a process to its settings; only a start
+            // without the flag does.
+            RestartForPermissionMode("the CLI setting applies only at start");
+            return;
+        }
+
+        RaisePermissionModeChanged();
+        _ = SendPermissionModeAsync(mode, previous);
+    }
+
+    /// <summary>
+    /// Sends <c>set_permission_mode</c> to the running process. The CLI applies
+    /// it at once, also within a running turn, and answers with the mode now
+    /// in effect.
+    ///
+    /// Bypass is refused unless the process was started in it, so that one
+    /// waits for a restart. A request that gets no answer does too, the same
+    /// as a model change. Any other refusal (a mode the account or the
+    /// settings do not allow) keeps the old mode and tells the user why.
+    /// </summary>
+    private async Task SendPermissionModeAsync(CliPermissionMode mode, CliPermissionMode previous)
+    {
+        Interlocked.Increment(ref _permissionRequestsInFlight);
+        try
+        {
+            EnsureDispatcherStarted();
+            var value = mode.ToCliValue()!;
+            var reply = await _control.SendAsync(
+                requestId => StreamJsonProtocol.BuildSetPermissionMode(requestId, value)).ConfigureAwait(false);
+
+            if (reply.Succeeded)
+            {
+                var inForce = reply.Response is { } body ? CliProcessInfo.ReadString(body, "mode") : null;
+                _logger.LogInformation("[ClaudeCli] Permission mode applied to the running CLI: {Mode}", inForce ?? value);
+                SetReportedPermissionMode(inForce ?? value);
+                return;
+            }
+
+            if (reply.ErrorCode == "bypass_not_launched" || reply.Error == CliControlChannel.NoResponse)
+            {
+                RestartForPermissionMode(reply.Error ?? "refused");
+                return;
+            }
+
+            lock (_permissionLock)
+            {
+                // Unless the user has picked again in the meantime.
+                if (_options.CliPermissionMode == mode)
+                    _options.CliPermissionMode = previous;
+            }
+            _logger.LogWarning(
+                "[ClaudeCli] CLI refused permission mode {Mode}: {Error} ({Code})",
+                value, reply.Error, reply.ErrorCode ?? "no code");
+
+            try { PermissionModeRejected?.Invoke(reply.Error ?? "The CLI refused the mode."); }
+            catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] PermissionModeRejected handler threw"); }
+            RaisePermissionModeChanged();
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _permissionRequestsInFlight);
+        }
+    }
+
+    private void RestartForPermissionMode(string reason)
+    {
+        _permissionRestartPending = true;
+        _restartBeforeNextMessage = true;
+        lock (_permissionLock) { _reportedPermissionMode = null; }
+        _logger.LogInformation(
+            "[ClaudeCli] Permission mode {Mode} applies after a restart before the next message ({Reason})",
+            PermissionMode, reason);
+        RaisePermissionModeChanged();
+    }
+
+    /// <summary>
+    /// Records the mode the CLI reports. When the session asks for a specific
+    /// mode and the CLI moves to another on its own (an approved plan leaves
+    /// plan mode), the requested mode follows, so a restart keeps the mode
+    /// the user last saw. "CLI setting" stays as it is: it names where the
+    /// mode came from, not the mode.
+    /// </summary>
+    private void SetReportedPermissionMode(string? mode)
+    {
+        if (string.IsNullOrEmpty(mode) || _permissionRestartPending) return;
+
+        lock (_permissionLock)
+        {
+            if (string.Equals(mode, _reportedPermissionMode, StringComparison.Ordinal)) return;
+            _reportedPermissionMode = mode;
+
+            if (Volatile.Read(ref _permissionRequestsInFlight) == 0
+                && _options.CliPermissionMode != CliPermissionMode.CliSetting
+                && CliPermissionModeExtensions.FromCliValue(mode) is { } reported)
+            {
+                _options.CliPermissionMode = reported;
+            }
+        }
+
+        _logger.LogInformation("[ClaudeCli] Permission mode in force: {Mode}", mode);
+        RaisePermissionModeChanged();
+    }
+
+    private void ClearReportedPermissionMode()
+    {
+        lock (_permissionLock) { _reportedPermissionMode = null; }
+        RaisePermissionModeChanged();
+    }
+
+    private void RaisePermissionModeChanged()
+    {
+        try { PermissionModeChanged?.Invoke(); }
+        catch (Exception ex)
+        {
+            // Same reasoning as UsageChanged: the dispatcher loop comes first.
+            _logger.LogError(ex, "[ClaudeCli] PermissionModeChanged handler threw");
+        }
+    }
+
     public void ClearHistory()
     {
         _cliSessionId = null;
@@ -1225,6 +1407,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         lock (_dispatcherLock) { _dispatcherTask = null; }
         _logger.LogInformation("[ClaudeCli] Session cleared (process killed)");
         SetCurrentModel(null);
+        ClearReportedPermissionMode();
         RaiseUsageChanged();
     }
 

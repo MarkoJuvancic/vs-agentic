@@ -163,6 +163,14 @@ internal static class StreamJsonProtocol
             w.WriteEndObject();
         });
 
+    /// <summary>
+    /// Build the control request that switches the permission mode of the
+    /// running process. The CLI answers with the mode now in effect and also
+    /// emits <c>system/status</c> with it.
+    /// </summary>
+    public static string BuildSetPermissionMode(string requestId, string mode) =>
+        BuildControlRequest(requestId, "set_permission_mode", w => w.WriteString("mode", mode));
+
     private static void WriteStringOrNull(Utf8JsonWriter w, string name, string? value)
     {
         if (value is null) w.WriteNull(name);
