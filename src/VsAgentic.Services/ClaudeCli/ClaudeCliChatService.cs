@@ -480,12 +480,21 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// <see cref="MessageStarted"/> once per message.</summary>
     private void StartTurn(TurnState turn)
     {
+        TurnState? running;
         lock (_activeTurnLock)
         {
             if (turn.Started) return;
+            running = _turns.Find(t => t.Started);
             turn.Started = true;
         }
         _logger.LogInformation("[ClaudeCli] Queued message started");
+
+        // The CLI reads a queued message into a running turn only between
+        // tool rounds, so the open step is done. Closing it here puts it
+        // before the message in the saved transcript too; otherwise it is
+        // saved only when the next block arrives, after the message.
+        if (running is not null)
+            FinalizeOpenBlocks(running);
         RaiseMessageStarted(turn);
     }
 
