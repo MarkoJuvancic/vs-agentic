@@ -147,9 +147,27 @@ internal static class StreamJsonProtocol
         BuildControlRequest(requestId, "initialize");
 
     /// <summary>
+    /// Build the <c>set_model</c> request. A null model returns the session to
+    /// the account's default model, not to the <c>--model</c> the process was
+    /// started with (measured on CLI 2.1.296).
+    /// </summary>
+    public static string BuildSetModel(string requestId, string? model) =>
+        BuildControlRequest(requestId, "set_model", w => WriteStringOrNull(w, "model", model));
+
+    /// <summary>
+    /// Build the <c>get_settings</c> request. Its answer carries, under
+    /// <c>applied</c>, the model and effort the next request will use.
+    /// </summary>
+    public static string BuildGetSettings(string requestId) =>
+        BuildControlRequest(requestId, "get_settings");
+
+    /// <summary>
     /// Build the control request that changes the model and/or effort of the
     /// running process. A setting is sent only when its <c>include</c> flag is
     /// set; a null value then returns it to the CLI default.
+    ///
+    /// The model goes through <see cref="BuildSetModel"/>; this carries it only
+    /// for a CLI that does not know that request.
     /// </summary>
     public static string BuildApplyFlagSettings(
         string requestId,

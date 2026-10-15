@@ -314,6 +314,50 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _logger.LogInformation(
             "[ClaudeCli] CLI {Version}: {Models} models, {Commands} commands",
             info.Version ?? "(version unknown)", info.Models.Count, info.Commands.Count);
+
+        try { ClaudeModelCatalog.SetReported(CliModelInfo.ToCatalog(info.Models)); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] Model list handler threw"); }
+
+        await RefreshAppliedEffortAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Asks the CLI which effort its next request will use. The answer
+    /// accounts for what VsAgentic cannot see: the user's own CLI settings,
+    /// environment overrides, and levels the model does not support.
+    /// </summary>
+    private async Task RefreshAppliedEffortAsync()
+    {
+        var reply = await _control.SendAsync(StreamJsonProtocol.BuildGetSettings).ConfigureAwait(false);
+        if (!reply.Succeeded || reply.Response is not { } body)
+        {
+            _logger.LogDebug("[ClaudeCli] get_settings failed: {Error}", reply.Error ?? "empty answer");
+            SetAppliedEffort(null);
+            return;
+        }
+
+        // A model without effort reads null, and so does a CLI that predates
+        // the field.
+        var effort = body.TryGetProperty("applied", out var applied) && applied.ValueKind == JsonValueKind.Object
+            ? ClaudeEffortExtensions.FromCliValue(CliProcessInfo.ReadString(applied, "effort"))
+            : null;
+        SetAppliedEffort(effort);
+    }
+
+    private ClaudeEffort? _appliedEffort;
+
+    public ClaudeEffort? AppliedEffort => _appliedEffort;
+
+    public event Action<ClaudeEffort?>? AppliedEffortChanged;
+
+    private void SetAppliedEffort(ClaudeEffort? effort)
+    {
+        if (_appliedEffort == effort) return;
+        _appliedEffort = effort;
+        _logger.LogInformation("[ClaudeCli] Applied effort: {Effort}", effort?.ToCliValue() ?? "(none)");
+
+        try { AppliedEffortChanged?.Invoke(effort); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] AppliedEffortChanged handler threw"); }
     }
 
     private async Task DispatchEventAsync(JsonElement evt)
@@ -1163,6 +1207,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _logger.LogInformation(
                 "[ClaudeCli] Model/effort set to '{Model}'/'{Effort}'; applies when the CLI starts",
                 alias.Length == 0 ? "(cli default)" : alias, effort);
+
+            // Read again when the process starts.
+            SetAppliedEffort(null);
         }
 
         // The model reported so far no longer describes what the next turn runs
@@ -1173,26 +1220,53 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     }
 
     /// <summary>
-    /// Sends a model/effort change to the running CLI as an
-    /// <c>apply_flag_settings</c> control request. The CLI applies it from its
-    /// next API request on, which within a turn means the next step.
+    /// Sends a model/effort change to the running CLI. The CLI applies it from
+    /// its next API request on, which within a turn means the next step.
     ///
-    /// A null value returns the setting to the CLI default — the Default entry
-    /// in either picker. Only changed settings are sent, so an effort change
-    /// does not count as a model switch on the CLI side.
+    /// The model goes as <c>set_model</c>, the request the CLI has for it; the
+    /// effort as <c>apply_flag_settings</c>, since there is no request of its
+    /// own for effort. A null value returns the setting to the CLI default —
+    /// the Default entry in either picker. Only changed settings are sent, so
+    /// an effort change does not count as a model switch on the CLI side.
     ///
-    /// The CLI answers success even for a value it ignores, so a success only
-    /// means the request was understood. An error or no answer means a CLI that
-    /// does not know the request; the change then waits for a restart before the
-    /// next message, which is the old behavior without the mid-turn kill.
+    /// A CLI that does not know <c>set_model</c> gets the model through
+    /// <c>apply_flag_settings</c>, as before. Any other error, or no answer,
+    /// leaves the change to a restart before the next message. That includes
+    /// <c>set_model</c> refusing a model it does not know (a typo in the Model
+    /// option): the restart passes it as <c>--model</c>, and the CLI fails there
+    /// as it did before this request was used.
+    ///
+    /// <c>apply_flag_settings</c> answers success even for a value it ignores,
+    /// so a success only means the request was understood. What the CLI then
+    /// uses is read back with <c>get_settings</c>.
     /// </summary>
     private async Task ApplyToRunningProcessAsync(
         bool includeModel, string? model, bool includeEffort, string? effort)
     {
         EnsureDispatcherStarted();
-        var reply = await _control.SendAsync(requestId => StreamJsonProtocol.BuildApplyFlagSettings(
-            requestId, includeModel, model, includeEffort, effort)).ConfigureAwait(false);
-        var error = reply.Error;
+
+        string? error = null;
+        var modelThroughFlags = false;
+
+        if (includeModel)
+        {
+            var reply = await _control.SendAsync(requestId => StreamJsonProtocol.BuildSetModel(requestId, model))
+                .ConfigureAwait(false);
+            error = reply.Error;
+            if (error is not null && IsUnknownRequest(error))
+            {
+                _logger.LogInformation("[ClaudeCli] CLI does not know set_model; sending the model as a flag setting");
+                modelThroughFlags = true;
+                error = null;
+            }
+        }
+
+        if (error is null && (includeEffort || modelThroughFlags))
+        {
+            var reply = await _control.SendAsync(requestId => StreamJsonProtocol.BuildApplyFlagSettings(
+                requestId, modelThroughFlags, model, includeEffort, effort)).ConfigureAwait(false);
+            error = reply.Error;
+        }
 
         if (error is null)
         {
@@ -1200,6 +1274,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 "[ClaudeCli] Model/effort applied to the running CLI: model {Model}, effort {Effort}",
                 includeModel ? model ?? "(cli default)" : "(unchanged)",
                 includeEffort ? effort ?? "(cli default)" : "(unchanged)");
+
+            // A new model can change the effort in force: a level it does not
+            // support is lowered, and one without effort sends none.
+            await RefreshAppliedEffortAsync().ConfigureAwait(false);
             return;
         }
 
@@ -1208,6 +1286,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             "[ClaudeCli] CLI did not take the model/effort change ({Error}); restarting before the next message",
             error);
     }
+
+    // The CLI's answer to a control request subtype it does not have.
+    private static bool IsUnknownRequest(string error) =>
+        error.IndexOf("Unsupported control request subtype", StringComparison.OrdinalIgnoreCase) >= 0;
 
     public void ClearHistory()
     {
@@ -1225,6 +1307,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         lock (_dispatcherLock) { _dispatcherTask = null; }
         _logger.LogInformation("[ClaudeCli] Session cleared (process killed)");
         SetCurrentModel(null);
+        SetAppliedEffort(null);
         RaiseUsageChanged();
     }
 
