@@ -94,6 +94,30 @@ public interface IChatService
     event Action<ClaudeEffort?>? AppliedEffortChanged;
 
     /// <summary>
+    /// Asks for fast mode for the rest of this session, or stops asking. A
+    /// running process takes it from its next request; a process started later
+    /// gets it before the first message. Not stored anywhere: a new session
+    /// starts without it.
+    /// </summary>
+    void SetFastMode(bool on);
+
+    /// <summary>Whether the user asked for fast mode in this session.</summary>
+    bool FastModeRequested { get; }
+
+    /// <summary>
+    /// Fast mode as the CLI last reported it. Whether a request runs fast
+    /// depends on this, not on <see cref="FastModeRequested"/>: the model, the
+    /// plan or the account can keep it off.
+    /// </summary>
+    FastModeStatus FastMode { get; }
+
+    /// <summary>
+    /// Raised when <see cref="FastMode"/> changes. Raised on a background
+    /// thread; hosts must marshal to the UI thread.
+    /// </summary>
+    event Action<FastModeStatus>? FastModeChanged;
+
+    /// <summary>
     /// Raised when the underlying CLI returned an authentication / login-required
     /// error. The string argument is the original error text from the CLI so the
     /// host can surface it to the user. Hosts should respond by showing a login

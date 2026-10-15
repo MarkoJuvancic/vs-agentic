@@ -155,6 +155,8 @@ public partial class ChatSessionViewModel
     {
         RefreshResolvedModelLabel();
         RefreshEffortOptions();
+        OnPropertyChanged(nameof(ShowFastMode));
+        OnPropertyChanged(nameof(FastModeTooltip));
         if (_suppressModelEffortApply) return;
 
         ApplyModelAndEffort();
@@ -260,6 +262,10 @@ public partial class ChatSessionViewModel
         chatService.AppliedEffortChanged += OnChatServiceAppliedEffortChanged;
         AppliedEffort = chatService.AppliedEffort;
 
+        chatService.FastModeChanged += OnChatServiceFastModeChanged;
+        FastModeStatus = chatService.FastMode;
+        IsFastModeOn = chatService.FastModeRequested;
+
         ClaudeModelCatalog.ReportedChanged += OnReportedModelsChanged;
         // The list may have arrived between building ours and subscribing.
         if (!ReferenceEquals(_modelOptionsSource, ClaudeModelCatalog.Reported))
@@ -267,6 +273,65 @@ public partial class ChatSessionViewModel
     }
 
     private void OnChatServiceAppliedEffortChanged(ClaudeEffort? effort) => Dispatch(() => AppliedEffort = effort);
+
+    private void OnChatServiceFastModeChanged(FastModeStatus status) => Dispatch(() => FastModeStatus = status);
+
+    // ── Fast mode ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The user's switch. For this session only: fast mode costs more, so a
+    /// new session does not inherit it.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowFastMode))]
+    [NotifyPropertyChangedFor(nameof(CanToggleFastMode))]
+    [NotifyPropertyChangedFor(nameof(FastModeTooltip))]
+    private bool _isFastModeOn;
+
+    /// <summary>What the CLI reports, which can differ from the switch.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanToggleFastMode))]
+    [NotifyPropertyChangedFor(nameof(FastModeTooltip))]
+    private FastModeStatus _fastModeStatus = FastModeStatus.Unknown;
+
+    partial void OnIsFastModeOnChanged(bool value)
+    {
+        try { _chatService?.SetFastMode(value); }
+        catch (Exception ex) { _logger.LogError(ex, "[VM] Could not change fast mode"); }
+    }
+
+    /// <summary>
+    /// Shown for a model the CLI offers fast mode for, and while it is on, so
+    /// it can be turned off after a switch to a model without it.
+    /// </summary>
+    public bool ShowFastMode => SelectedModel?.SupportsFastMode == true || IsFastModeOn;
+
+    /// <summary>
+    /// Off only when something outside VsAgentic blocks fast mode and it is
+    /// not on; turning it off always works.
+    /// </summary>
+    public bool CanToggleFastMode => IsFastModeOn || !FastModeStatus.IsBlocked;
+
+    public string FastModeTooltip
+    {
+        get
+        {
+            var text = "Fast mode: faster output from the same model, billed at a higher rate.\n"
+                       + "For this session only. Takes effect on the next request.";
+
+            if (FastModeStatus.BlockedText is { } blocked)
+                return text + "\n\n" + blocked;
+            if (!IsFastModeOn)
+                return text;
+            if (FastModeStatus.IsCoolingDown)
+                return text + "\n\nPaused after a rate limit. Requests run at standard speed until it resumes.";
+            if (SelectedModel?.SupportsFastMode == false)
+                return text + "\n\nThe selected model has no fast mode. It applies again on a model that has.";
+            if (FastModeStatus.IsOn)
+                return text + "\n\nOn.";
+            return text;
+        }
+    }
 
     private void OnReportedModelsChanged(IReadOnlyList<ClaudeModelInfo> models) => Dispatch(RebuildModelOptions);
 
@@ -529,6 +594,7 @@ public partial class ModelOption : ObservableObject
         Alias = info.Alias;
         Description = info.Description;
         SupportedEfforts = info.SupportedEfforts;
+        SupportsFastMode = info.SupportsFastMode;
         _displayName = info.IsCliDefault ? UnresolvedLabel : info.DisplayName;
     }
 
@@ -539,6 +605,9 @@ public partial class ModelOption : ObservableObject
 
     /// <inheritdoc cref="ClaudeModelInfo.SupportedEfforts"/>
     public IReadOnlyList<ClaudeEffort>? SupportedEfforts { get; }
+
+    /// <inheritdoc cref="ClaudeModelInfo.SupportsFastMode"/>
+    public bool SupportsFastMode { get; }
 
     public bool IsCliDefault => Alias.Length == 0;
 

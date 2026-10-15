@@ -181,6 +181,19 @@ internal static class StreamJsonProtocol
             w.WriteEndObject();
         });
 
+    /// <summary>
+    /// Build the request that turns fast mode on or off:
+    /// <c>apply_flag_settings {fastMode}</c>. There is no request of its own
+    /// for it; the SDK's flag-settings example uses this key.
+    /// </summary>
+    public static string BuildFastMode(string requestId, bool on) =>
+        BuildControlRequest(requestId, "apply_flag_settings", w =>
+        {
+            w.WriteStartObject("settings");
+            w.WriteBoolean("fastMode", on);
+            w.WriteEndObject();
+        });
+
     private static void WriteStringOrNull(Utf8JsonWriter w, string name, string? value)
     {
         if (value is null) w.WriteNull(name);
