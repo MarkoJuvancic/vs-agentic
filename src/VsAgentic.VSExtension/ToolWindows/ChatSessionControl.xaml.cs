@@ -51,6 +51,9 @@ public partial class ChatSessionControl : UserControl
         viewModel.MessageBackgroundStateSet += (id, state, summary) =>
             _ = ChatWebView.SetBackgroundStateAsync(id, state, summary);
 
+        viewModel.MessageCanMoveToBackground += (id) =>
+            _ = ChatWebView.SetCanMoveToBackgroundAsync(id);
+
         viewModel.MessageCompleted += (id) =>
             _ = ChatWebView.CompleteMessageAsync(id);
 
@@ -77,6 +80,9 @@ public partial class ChatSessionControl : UserControl
         // not by WPF; the page relays them.
         ChatWebView.ZoomChangeRequested += OnZoomChangeRequested;
 
+        // The "Run in background" button on a running step.
+        ChatWebView.MoveToBackgroundRequested += OnMoveToBackgroundRequested;
+
         // Zoom is one setting across every chat window, so follow it rather
         // than own it. Applied without the toast here: this is the window
         // adopting the level it was born into, not the user changing it.
@@ -94,6 +100,7 @@ public partial class ChatSessionControl : UserControl
         VSColorTheme.ThemeChanged -= OnThemeChanged;
         ChatZoom.Changed -= OnZoomChanged;
         ChatWebView.ZoomChangeRequested -= OnZoomChangeRequested;
+        ChatWebView.MoveToBackgroundRequested -= OnMoveToBackgroundRequested;
 
         // A popup is its own window and would outlive the pane it belongs to.
         _zoomToastTimer?.Stop();
@@ -277,6 +284,22 @@ public partial class ChatSessionControl : UserControl
     }
 
     private void OnZoomChangeRequested(int step) => ChatZoom.Step(step);
+
+    private void OnMoveToBackgroundRequested(string stepId)
+    {
+        if (DataContext is ChatSessionViewModel vm)
+            _ = vm.MoveStepToBackgroundAsync(stepId);
+    }
+
+    // Read the output as the tooltip opens rather than on a timer: nobody
+    // looks at it most of the time, and each read is a request to the CLI.
+    // The tooltip shows the last text it had and changes when the answer
+    // comes, in a few milliseconds.
+    private void BackgroundTask_ToolTipOpening(object sender, ToolTipEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is BackgroundTaskItemViewModel task)
+            _ = task.RefreshOutputAsync();
+    }
 
     private void OnZoomChanged(double level)
     {

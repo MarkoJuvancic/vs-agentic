@@ -244,6 +244,22 @@ html, body {
 .toolstep-bg-Stopped { color: var(--text-muted); }
 @keyframes bg-pulse { 50% { opacity: 0.45; } }
 
+/* "Run in background" on a step whose command or subagent still holds the
+   turn. Shaped like the mark it turns into. */
+.toolstep-bgbtn {
+    font: inherit;
+    font-size: 11px;
+    padding: 0 6px;
+    color: var(--info);
+    background: transparent;
+    border: 1px solid currentColor;
+    border-radius: 8px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.toolstep-bgbtn:hover { background: var(--bg-input); }
+.toolstep-bgbtn:disabled { opacity: 0.5; cursor: default; }
+
 /* Notice: a one-line event from the extension, e.g. a background command that
    ended. Indented like a step, in muted text, with a colored outcome icon. */
 .msg-notice {
@@ -1029,6 +1045,17 @@ function addMessage(id, type, dataJson) {
         text.textContent = data.Content || '';
         div.appendChild(icon);
         div.appendChild(text);
+        // A shell command that ran in the background: the file the CLI wrote
+        // its output to. It opens like any other file link.
+        if (data.Body) {
+            var output = document.createElement('a');
+            output.href = '#';
+            output.className = 'file-link';
+            output.dataset.path = data.Body;
+            output.title = data.Body;
+            output.textContent = 'Open output';
+            div.appendChild(output);
+        }
     }
     else if (type === 'Thinking') {
         div.classList.add('msg-thinking');
@@ -1170,6 +1197,7 @@ function updateStatus(id, status, expanderTitle) {
         var et = el.querySelector('.msg-expander-title');
         if (et) et.textContent = expanderTitle;
     }
+    if (status !== 'Pending') removeMoveToBackground(id);
 
     // The folded row speaks for whichever step is in flight, so a title that
     // moves on (thinking counting its seconds) has to move the row with it.
@@ -1194,6 +1222,7 @@ var BG_LABELS = {
 // the outcome when the CLI reports the work ended; the summary (e.g. the exit
 // code) goes into the tooltip.
 function setBackgroundState(id, state, summary) {
+    removeMoveToBackground(id);
     var el = document.getElementById('msg-' + id);
     if (!el) return;
     var header = el.querySelector('.toolstep-header');
@@ -1206,6 +1235,45 @@ function setBackgroundState(id, state, summary) {
     badge.className = 'toolstep-bg toolstep-bg-' + state;
     badge.textContent = BG_LABELS[state] || state;
     badge.title = summary || '';
+}
+
+// Offers "Run in background" on a step whose command or subagent holds the
+// turn. The CLI makes that possible a few seconds into the step. While the
+// step runs it is usually folded into the activity row, so the button goes on
+// the row's header, which is what the user sees; a step outside a row gets it
+// on its own header.
+function setCanMoveToBackground(id) {
+    var el = document.getElementById('msg-' + id);
+    if (!el || el.dataset.done || moveToBackgroundButton(id)) return;
+    var group = el.closest('.activity');
+    var host = group ? group.querySelector('.activity-header') : el.querySelector('.toolstep-header');
+    if (!host) return;
+
+    var btn = document.createElement('button');
+    btn.className = 'toolstep-bgbtn';
+    btn.dataset.bgStep = id;
+    btn.textContent = 'Run in background';
+    btn.title = 'Let ' + (el.querySelector('.toolstep-name') || {textContent: 'this step'}).textContent +
+        ' go on in the background and continue the turn';
+    btn.addEventListener('click', function(e) {
+        // The row header opens and closes the row on a click.
+        e.stopPropagation();
+        btn.disabled = true;
+        window.chrome.webview.postMessage(JSON.stringify({type:'moveToBackground', id:id}));
+    });
+    host.insertBefore(btn, group ? host.querySelector('.activity-count') : null);
+}
+
+function moveToBackgroundButton(id) {
+    var buttons = document.querySelectorAll('.toolstep-bgbtn');
+    for (var i = 0; i < buttons.length; i++)
+        if (buttons[i].dataset.bgStep === id) return buttons[i];
+    return null;
+}
+
+function removeMoveToBackground(id) {
+    var btn = moveToBackgroundButton(id);
+    if (btn) btn.remove();
 }
 
 function setBody(id, bodyContent, bodyMode) {
@@ -1284,6 +1352,9 @@ function completeMessage(id) {
     if (type === 'ToolStep') {
         var exp = el.querySelector('.msg-expander');
         if (exp) exp.style.display = 'none';
+        // The offer can arrive just after the step ended; it must not stand.
+        el.dataset.done = '1';
+        removeMoveToBackground(id);
     }
 }
 
