@@ -310,6 +310,16 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             // Background tasks are children of the CLI and end with it.
             SetBackgroundTasks(Array.Empty<BackgroundTask>());
 
+            // The work ends without a notification, so mark the steps here.
+            string[] cutOff;
+            lock (_runningBackgroundSteps)
+            {
+                cutOff = _runningBackgroundSteps.ToArray();
+                _runningBackgroundSteps.Clear();
+            }
+            foreach (var stepId in cutOff)
+                RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Stopped, "Ended with the Claude CLI process.");
+
             // So is any answer it still owed us. Only this process's channel:
             // a new process may already be running with requests of its own.
             control.FailAll("process exited");
@@ -342,6 +352,59 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _logger.LogInformation(
             "[ClaudeCli] CLI {Version}: {Models} models, {Commands} commands",
             info.Version ?? "(version unknown)", info.Models.Count, info.Commands.Count);
+    }
+
+    // ── Background steps ──────────────────────────────────────────────────
+    // A tool call with run_in_background completes at once; the CLI then
+    // reports the work it started with task_started and, possibly turns
+    // later, task_notification. Both carry the tool_use_id, which is also the
+    // step id, so the transcript can mark the step. Handled without an
+    // active turn, since the notification usually arrives between turns.
+
+    private readonly HashSet<string> _runningBackgroundSteps = new HashSet<string>(StringComparer.Ordinal);
+
+    public event Action<string, BackgroundStepState, string?>? StepBackgroundStateChanged;
+
+    private void HandleTaskStarted(JsonElement evt)
+    {
+        // Foreground tasks (a subagent the turn waits on) report here too.
+        if (!evt.TryGetProperty("is_backgrounded", out var bg) || bg.ValueKind != JsonValueKind.True)
+            return;
+        var stepId = evt.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+        if (string.IsNullOrEmpty(stepId)) return;
+
+        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Add(stepId!); }
+        RaiseStepBackgroundStateChanged(stepId!, BackgroundStepState.Running, null);
+    }
+
+    private void HandleTaskNotification(JsonElement evt)
+    {
+        var stepId = evt.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+        if (string.IsNullOrEmpty(stepId)) return;
+
+        lock (_runningBackgroundSteps)
+        {
+            // Not one we marked as running: a foreground task, or one from
+            // before the session was reopened.
+            if (!_runningBackgroundSteps.Remove(stepId!)) return;
+        }
+
+        var status = evt.TryGetProperty("status", out var sp) ? sp.GetString() : null;
+        var state = status switch
+        {
+            "completed" => BackgroundStepState.Completed,
+            "failed" => BackgroundStepState.Failed,
+            _ => BackgroundStepState.Stopped,
+        };
+        var summary = evt.TryGetProperty("summary", out var sm) ? sm.GetString() : null;
+        RaiseStepBackgroundStateChanged(stepId!, state, summary);
+    }
+
+    private void RaiseStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary)
+    {
+        _logger.LogInformation("[ClaudeCli] Background step {Id}: {State}", stepId, state);
+        try { StepBackgroundStateChanged?.Invoke(stepId, state, summary); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] StepBackgroundStateChanged handler threw"); }
     }
 
     private async Task DispatchEventAsync(JsonElement evt)
@@ -392,6 +455,14 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             case "background_tasks_changed":
                 HandleBackgroundTasksChanged(evt);
+                return;
+
+            case "task_started":
+                HandleTaskStarted(evt);
+                return;
+
+            case "task_notification":
+                HandleTaskNotification(evt);
                 return;
         }
     }
@@ -1259,6 +1330,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _contextTokens = 0;
             _countedMessageIds.Clear();
         }
+
+        // Forget the running steps before the process goes, or the dispatcher
+        // reports them as stopped into the transcript that was just cleared.
+        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Clear(); }
 
         _host.Stop();
         lock (_dispatcherLock) { _dispatcherTask = null; }
