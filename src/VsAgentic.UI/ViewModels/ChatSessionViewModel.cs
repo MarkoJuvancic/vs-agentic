@@ -611,7 +611,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             : $"{header}\n{list}\n\n{text}";
     }
 
-    [RelayCommand(CanExecute = nameof(CanSend))]
+    // Concurrent: a message sent while a turn runs is a second SendAsync
+    // alongside the first. Without it the command reports itself disabled
+    // until the running call returns, whatever CanSend says.
+    [RelayCommand(CanExecute = nameof(CanSend), AllowConcurrentExecutions = true)]
     private async Task SendAsync()
     {
         var typed = InputText.Trim();
