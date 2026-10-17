@@ -25,6 +25,22 @@ public record OutputItem
     public string? Delta { get; set; }
 }
 
+/// <summary>
+/// Tool names of the steps that report on the session rather than on a tool
+/// call: an API retry, a compaction, a notice from the CLI or a hook. The
+/// transcript shows these as a line of their own instead of folding them into
+/// the turn's activity row, and their title can change while they are open.
+/// </summary>
+public static class SessionLineSteps
+{
+    public const string Retry = "Retry";
+    public const string Compact = "Compact";
+    public const string CliMessage = "CliMessage";
+
+    public static bool Contains(string? toolName) =>
+        toolName is Retry or Compact or CliMessage;
+}
+
 public interface IOutputListener
 {
     /// <summary>

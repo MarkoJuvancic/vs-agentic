@@ -365,8 +365,302 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             case "background_tasks_changed":
                 HandleBackgroundTasksChanged(evt);
                 return;
+
+            case "api_retry":
+                HandleApiRetry(evt);
+                return;
+
+            case "status":
+                HandleStatus(evt);
+                return;
+
+            case "compact_boundary":
+                HandleCompactBoundary(evt);
+                return;
+
+            case "informational":
+                HandleInformational(evt);
+                return;
+
+            case "notification":
+                HandleNotification(evt);
+                return;
+
+            case "local_command_output":
+                HandleLocalCommandOutput(evt);
+                return;
         }
     }
+
+    private TurnState? ActiveTurn()
+    {
+        lock (_activeTurnLock) { return _activeTurn; }
+    }
+
+    // ── Session notices ───────────────────────────────────────────────────
+    // What the CLI reports about the session rather than about a tool call:
+    // a failed API request it is about to retry, a compaction, a hook's
+    // message. Without these a retry loop looks like a hang, and a prompt a
+    // hook blocked ends the turn with nothing on screen at all.
+
+    /// <summary>
+    /// One open line for the whole run of retries, retitled on each attempt:
+    /// a run can reach ten attempts, and the user needs the latest one, not
+    /// the history. Closed by whatever the CLI sends next.
+    /// </summary>
+    private void HandleApiRetry(JsonElement evt)
+    {
+        var turn = ActiveTurn();
+        if (turn == null) return;
+
+        var attempt = ReadInt(evt, "attempt");
+        var maxRetries = ReadInt(evt, "max_retries");
+        var delayMs = ReadInt(evt, "retry_delay_ms");
+        var reason = DescribeApiError(evt);
+        _logger.LogInformation("[ClaudeCli] API retry {Attempt}/{Max} in {Delay} ms: {Reason}",
+            attempt, maxRetries, delayMs, reason);
+
+        var title = $"API request failed ({reason}). Retrying in {FormatSeconds(delayMs)}, attempt {attempt} of {maxRetries}";
+        turn.RetryCount = attempt ?? turn.RetryCount + 1;
+        turn.RetryReason = reason;
+
+        if (turn.RetryItem == null)
+        {
+            turn.RetryItem = new OutputItem
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                ToolName = SessionLineSteps.Retry,
+                Title = title,
+                Status = OutputItemStatus.Pending
+            };
+            _outputListener.OnStepStarted(turn.RetryItem);
+        }
+        else
+        {
+            turn.RetryItem.Title = title;
+            _outputListener.OnStepUpdated(turn.RetryItem);
+        }
+    }
+
+    private void FinalizeRetryItem(TurnState turn, OutputItemStatus status)
+    {
+        var item = turn.RetryItem;
+        if (item == null) return;
+        turn.RetryItem = null;
+
+        var times = turn.RetryCount == 1 ? "once" : $"{turn.RetryCount} times";
+        item.Title = status == OutputItemStatus.Error
+            ? $"API request failed after retrying {times} ({turn.RetryReason})"
+            : $"API request retried {times} ({turn.RetryReason})";
+        item.Status = status;
+        _outputListener.OnStepCompleted(item);
+    }
+
+    // The error is a category ("overloaded", "rate_limit"); the status is null
+    // for a connection that never got an HTTP answer.
+    private static string DescribeApiError(JsonElement evt)
+    {
+        var error = CliProcessInfo.ReadString(evt, "error");
+        var status = ReadInt(evt, "error_status");
+        if (evt.TryGetProperty("no_response", out var nr) && nr.ValueKind == JsonValueKind.Object)
+            error ??= "no response";
+
+        var text = (error ?? "error").Replace('_', ' ');
+        return status is null ? text : $"{text}, HTTP {status}";
+    }
+
+    /// <summary>
+    /// <c>compacting</c> opens the compaction line; the status that follows
+    /// says how it went. Success waits for <c>compact_boundary</c>, which
+    /// carries the token counts. A failure closes the line here, because no
+    /// boundary follows.
+    /// </summary>
+    private void HandleStatus(JsonElement evt)
+    {
+        var turn = ActiveTurn();
+        if (turn == null) return;
+
+        var status = CliProcessInfo.ReadString(evt, "status");
+        if (status == "compacting")
+        {
+            if (turn.CompactItem != null) return;
+            _logger.LogInformation("[ClaudeCli] Compacting the conversation");
+            turn.CompactItem = new OutputItem
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                ToolName = SessionLineSteps.Compact,
+                Title = "Compacting the conversation…",
+                Status = OutputItemStatus.Pending
+            };
+            _outputListener.OnStepStarted(turn.CompactItem);
+            return;
+        }
+
+        if (CliProcessInfo.ReadString(evt, "compact_result") == "failed" && turn.CompactItem is { } item)
+        {
+            var error = CliProcessInfo.ReadString(evt, "compact_error");
+            _logger.LogWarning("[ClaudeCli] Compaction failed: {Error}", error);
+            turn.CompactItem = null;
+            item.Title = "Compaction failed";
+            item.Body = error;
+            item.Status = OutputItemStatus.Error;
+            _outputListener.OnStepCompleted(item);
+        }
+    }
+
+    /// <summary>
+    /// The conversation was compacted, by <c>/compact</c> or automatically.
+    /// Also arrives without a preceding <c>compacting</c> status, so the line
+    /// is opened here when there is none.
+    /// </summary>
+    private void HandleCompactBoundary(JsonElement evt)
+    {
+        var turn = ActiveTurn();
+        if (turn == null) return;
+
+        long? pre = null, post = null;
+        string? trigger = null;
+        if (evt.TryGetProperty("compact_metadata", out var meta) && meta.ValueKind == JsonValueKind.Object)
+        {
+            pre = ReadLong(meta, "pre_tokens");
+            post = ReadLong(meta, "post_tokens");
+            trigger = CliProcessInfo.ReadString(meta, "trigger");
+        }
+        _logger.LogInformation("[ClaudeCli] Conversation compacted ({Trigger}): {Pre} -> {Post} tokens",
+            trigger ?? "?", pre, post);
+
+        var title = trigger == "auto" ? "Conversation compacted automatically" : "Conversation compacted";
+        if (pre is not null)
+            title += post is null
+                ? $" · {FormatTokens(pre.Value)} tokens before"
+                : $" · {FormatTokens(pre.Value)} → {FormatTokens(post.Value)} tokens";
+
+        var item = turn.CompactItem;
+        turn.CompactItem = null;
+        if (item == null)
+        {
+            item = new OutputItem
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                ToolName = SessionLineSteps.Compact,
+                Title = title,
+                Status = OutputItemStatus.Pending
+            };
+            _outputListener.OnStepStarted(item);
+        }
+        item.Title = title;
+        item.Status = OutputItemStatus.Success;
+        _outputListener.OnStepCompleted(item);
+    }
+
+    // Covers a boundary that never came: the line must not spin past the turn.
+    private void FinalizeCompactItem(TurnState turn)
+    {
+        var item = turn.CompactItem;
+        if (item == null) return;
+        turn.CompactItem = null;
+        item.Title = "Conversation compacted";
+        item.Status = OutputItemStatus.Success;
+        _outputListener.OnStepCompleted(item);
+    }
+
+    /// <summary>
+    /// A line the CLI wants the user to read: a hook's message, the reason a
+    /// hook blocked the prompt, a warning raised during the turn. Level
+    /// <c>info</c> is meant for a verbose transcript view only, so it goes to
+    /// the log.
+    /// </summary>
+    private void HandleInformational(JsonElement evt)
+    {
+        var content = CliProcessInfo.ReadString(evt, "content");
+        var level = CliProcessInfo.ReadString(evt, "level");
+        _logger.LogInformation("[ClaudeCli] CLI {Level}: {Content}", level ?? "informational", content);
+        if (string.IsNullOrWhiteSpace(content) || level == "info") return;
+
+        var stopped = evt.TryGetProperty("prevent_continuation", out var pc) && pc.ValueKind == JsonValueKind.True;
+
+        // A blocked prompt names its reason on its own; the content wraps it in
+        // the hook's whole command line and repeats the prompt.
+        string? title = null;
+        if (evt.TryGetProperty("prompt_submit_outcome", out var outcome) && outcome.ValueKind == JsonValueKind.Object
+            && CliProcessInfo.ReadString(outcome, "kind") == "blocked_by_hook")
+        {
+            var reason = CliProcessInfo.ReadString(outcome, "reason");
+            title = string.IsNullOrWhiteSpace(reason)
+                ? "A hook blocked the prompt"
+                : $"A hook blocked the prompt: {reason}";
+        }
+
+        EmitNotice(content!, title,
+            level == "warning" || stopped ? OutputItemStatus.Error : OutputItemStatus.Info);
+    }
+
+    private void HandleNotification(JsonElement evt)
+    {
+        var text = CliProcessInfo.ReadString(evt, "text");
+        _logger.LogInformation("[ClaudeCli] CLI notification ({Key}): {Text}",
+            CliProcessInfo.ReadString(evt, "key"), text);
+        if (string.IsNullOrWhiteSpace(text)) return;
+        EmitNotice(text!, null, OutputItemStatus.Info);
+    }
+
+    /// <summary>
+    /// Output of a slash command the CLI runs itself. It is the answer to the
+    /// prompt, so it is shown as one.
+    /// </summary>
+    private void HandleLocalCommandOutput(JsonElement evt)
+    {
+        var turn = ActiveTurn();
+        var content = CliProcessInfo.ReadString(evt, "content");
+        if (turn == null || string.IsNullOrEmpty(content)) return;
+        AppendResponseText(turn, content!);
+    }
+
+    /// <summary>
+    /// A finished notice line. The first line of the text is the title; a
+    /// longer text goes into the body. Shown even between turns: a notice is
+    /// not tied to one.
+    /// </summary>
+    private void EmitNotice(string text, string? title, OutputItemStatus status)
+    {
+        text = text.Trim();
+        var newline = text.IndexOf('\n');
+        var firstLine = (newline < 0 ? text : text.Substring(0, newline)).Trim();
+        title ??= firstLine;
+
+        var item = new OutputItem
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            ToolName = SessionLineSteps.CliMessage,
+            Title = title.Length > 200 ? title.Substring(0, 200) + "…" : title,
+            Status = status,
+            Body = title == text ? null : text
+        };
+        _outputListener.OnStepStarted(item);
+        _outputListener.OnStepCompleted(item);
+    }
+
+    private static int? ReadInt(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var v)
+            ? v
+            : null;
+
+    private static long? ReadLong(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt64(out var v)
+            ? v
+            : null;
+
+    private static string FormatSeconds(int? ms)
+    {
+        if (ms is null) return "a moment";
+        var s = Math.Max(1, (int)Math.Round(ms.Value / 1000.0));
+        return $"{s} s";
+    }
+
+    private static string FormatTokens(long tokens) =>
+        tokens >= 1000
+            ? (tokens / 1000.0).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "k"
+            : tokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private void HandleInit(CliInitEvent init)
     {
@@ -438,6 +732,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (turn == null) return;
 
         if (!evt.TryGetProperty("message", out var msg)) return;
+
+        // An answer, or the synthetic message, tagged with an error, that
+        // reports the request failed for good. Either way the retries are over.
+        var gaveUp = evt.TryGetProperty("error", out var giveUp) && giveUp.ValueKind == JsonValueKind.String;
+        FinalizeRetryItem(turn, gaveUp ? OutputItemStatus.Error : OutputItemStatus.Info);
 
         // Before the content check: a message can carry usage worth counting
         // even when its content block is one we do not render.
@@ -519,6 +818,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         var text = block.TryGetProperty("text", out var tp) ? tp.GetString() ?? "" : "";
         if (string.IsNullOrEmpty(text)) return;
 
+        AppendResponseText(turn, text);
+    }
+
+    private void AppendResponseText(TurnState turn, string text)
+    {
         if (turn.ResponseItem == null)
         {
             turn.ResponseItem = new OutputItem
@@ -645,9 +949,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         lock (_activeTurnLock) { turn = _activeTurn; }
         if (turn == null) return;
 
-        FinalizeOpenBlocks(turn);
-
         var isError = evt.TryGetProperty("is_error", out var ie) && ie.ValueKind == JsonValueKind.True;
+        if (isError) FinalizeRetryItem(turn, OutputItemStatus.Error);
+        FinalizeOpenBlocks(turn);
         if (isError)
         {
             var resultText = evt.TryGetProperty("result", out var rp) ? rp.GetString() : null;
@@ -744,6 +1048,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         FinalizeThinkingItem(turn);
         FinalizeResponseItem(turn);
         FinalizeToolItem(turn);
+        FinalizeRetryItem(turn, OutputItemStatus.Info);
+        FinalizeCompactItem(turn);
     }
 
     private void EmitFatalError(string body)
@@ -1332,6 +1638,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         public StringBuilder ResponseBuilder = new StringBuilder();
 
         public OutputItem? ToolItem;
+
+        // The open retry and compaction lines; see HandleApiRetry, HandleStatus.
+        public OutputItem? RetryItem;
+        public int RetryCount;
+        public string? RetryReason;
+        public OutputItem? CompactItem;
 
         // Set when the CLI flags an assistant message as "authentication_failed".
         public bool AuthFailed;
