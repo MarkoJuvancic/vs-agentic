@@ -137,8 +137,6 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     partial void OnHasBackgroundTasksChanged(bool value) => UpdateSessionInfoActivity();
 
-    partial void OnBackgroundTasksTextChanged(string value) => UpdateSessionInfoActivity();
-
     /// <summary>
     /// Copies the state to the session list row, so a session in a hidden
     /// window still shows whether it works or waits. The row's name stays
@@ -152,7 +150,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         SessionInfo.HasBackgroundTasks = HasBackgroundTasks;
         SessionInfo.ActivityStatus = Activity switch
         {
-            SessionActivity.Idle => HasBackgroundTasks ? BackgroundTasksText : string.Empty,
+            SessionActivity.Idle => HasBackgroundTasks ? "Running in background" : string.Empty,
             // A login banner can come up outside a turn, where BusyStatus
             // would still read "Thinking...".
             SessionActivity.AwaitingUser when !IsBusy => "Waiting for you",

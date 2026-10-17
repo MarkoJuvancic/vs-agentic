@@ -119,8 +119,8 @@ public partial class SessionInfo : ObservableObject
 
     /// <summary>
     /// The line the row shows instead of "Last activity" while the session
-    /// works, waits or runs background tasks — the same text the chat window
-    /// shows under the transcript.
+    /// works, waits or runs background tasks. While a turn runs it is the same
+    /// text as the bar under the chat.
     /// </summary>
     [ObservableProperty]
     private string _activityStatus = string.Empty;
