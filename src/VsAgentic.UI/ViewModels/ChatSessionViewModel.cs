@@ -272,6 +272,13 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     partial void OnIsBusyChanged(bool value)
     {
+        // Every turn end counts, not just clean ones and not just turns the
+        // user sent — Stop, an error and a turn the CLI starts on its own all
+        // still leave the window worth glancing back at. Unless the user is
+        // already in it, in which case they have just watched the turn end and
+        // there is nothing left to announce.
+        if (!value) _turnUnseen = !IsSessionFocused;
+
         // Both the elapsed count and the step label belong to one turn.
         _turnStartedUtc = value ? DateTime.UtcNow : null;
         _currentStep = null;
@@ -969,11 +976,6 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             _sendCts?.Dispose();
             _sendCts = null;
-            // Every turn end counts, not just clean ones — Stop and an error
-            // both still leave the window worth glancing back at. Unless the
-            // user is already in it, in which case they have just watched the
-            // turn end and there is nothing left to announce.
-            _turnUnseen = !IsSessionFocused;
             IsBusy = false;
             TurnEnded?.Invoke();
         }
