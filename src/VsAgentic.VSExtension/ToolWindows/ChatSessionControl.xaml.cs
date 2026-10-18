@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
+using VsAgentic.Services.Abstractions;
 using VsAgentic.UI.Controls;
 using VsAgentic.UI.ViewModels;
 
@@ -55,6 +56,9 @@ public partial class ChatSessionControl : UserControl
 
         viewModel.MessagesRestored += (messages) =>
             _ = ChatWebView.LoadMessagesAsync(messages);
+
+        viewModel.TurnEnded += () =>
+            _ = ChatWebView.EndActivityAsync();
 
         // Banner mounting is now driven by the ActiveBanner property on the VM —
         // the BannerHost ContentControl in XAML binds to it and DataTemplates
@@ -174,16 +178,15 @@ public partial class ChatSessionControl : UserControl
         Map("--text-heading", EnvironmentColors.ToolWindowTextColorKey);
         Map("--text-muted", EnvironmentColors.CommandBarTextInactiveColorKey);
         Map("--border", EnvironmentColors.ToolWindowBorderColorKey);
-        // Use VS hyperlink color (theme-driven) rather than the OS system
-        // highlight, which on Win11 is often violet/purple and clashes with
-        // the dark/light VS theme.
-        Map("--accent", EnvironmentColors.PanelHyperlinkColorKey);
         Map("--code-bg", EnvironmentColors.ToolWindowContentGridColorKey);
         Map("--pre-bg", EnvironmentColors.ToolWindowBackgroundColorKey);
         Map("--thinking-bg", EnvironmentColors.CommandBarGradientBeginColorKey);
 
+        var accent = ThemeAccent();
+        colors["--accent"] = ToCssHex(accent);
+
         var toolWindowBackground = VSColorTheme.GetThemedColor(EnvironmentColors.ToolWindowBackgroundColorKey);
-        var promptAccent = VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
+        var promptAccent = accent;
         var promptBorderBase = VSColorTheme.GetThemedColor(EnvironmentColors.ToolWindowBorderColorKey);
         var promptBgBlend = RelativeLuminance(toolWindowBackground) >= 0.5 ? 0.08 : 0.12;
 
@@ -199,6 +202,55 @@ public partial class ChatSessionControl : UserControl
 
         _ = ChatWebView.SetThemeColorsAsync(colors);
     }
+
+    /// <summary>
+    /// The color the chat uses for links, focus borders and the prompt accent.
+    /// </summary>
+    /// <remarks>
+    /// The OS system highlight is deliberately not used: on Windows 11 it is
+    /// often violet and clashes with the VS theme.
+    /// </remarks>
+    private static System.Drawing.Color ThemeAccent() =>
+        // A theme written for the Visual Studio 2026 shell defines the Shell
+        // category and leaves the Environment category to its fallback theme.
+        // PanelHyperlink then carries the fallback's color, not the theme's, so
+        // ask the shell first and keep the environment key for VS 2022.
+        TryGetShellColor("HyperlinkFillPrimary")
+            ?? VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
+
+    /// <summary>
+    /// Reads one color of the Visual Studio 2026 shell palette. Returns null on
+    /// Visual Studio 2022, whose shell has no such category, and on any theme
+    /// that leaves the color undefined.
+    /// </summary>
+    private static System.Drawing.Color? TryGetShellColor(string name)
+    {
+        var application = Application.Current;
+        if (application is null)
+            return null;
+
+        // The palette stores these colors as background values, so that is the
+        // key type the theme registers them under.
+        var key = new ThemeResourceKey(ShellCategory, name, ThemeResourceKeyType.BackgroundColor);
+
+        var resource = application.TryFindResource(key);
+        var color = resource switch
+        {
+            Color themeColor => themeColor,
+            SolidColorBrush themeBrush => themeBrush.Color,
+            _ => (Color?)null,
+        };
+
+        return color is Color found
+            ? System.Drawing.Color.FromArgb(found.A, found.R, found.G, found.B)
+            : null;
+    }
+
+    /// <summary>
+    /// Category of the shell palette that Visual Studio 2026 themes are built
+    /// on. Named "Shell" in a theme's .pkgdef.
+    /// </summary>
+    private static readonly Guid ShellCategory = new("73708DED-2D56-4AAD-B8EB-73B20D3F4BFF");
 
     private static System.Drawing.Color Blend(System.Drawing.Color from, System.Drawing.Color to, double amount)
     {
@@ -232,6 +284,15 @@ public partial class ChatSessionControl : UserControl
 
     private static string ToCssHex(System.Drawing.Color color) =>
         $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+
+    private void RemoveAttachment_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is ChatSessionViewModel vm &&
+            sender is FrameworkElement { DataContext: IChatAttachment attachment })
+        {
+            vm.RemoveAttachment(attachment);
+        }
+    }
 
     // ------------------------------------------------------------------
     // Zoom
@@ -442,6 +503,89 @@ public partial class ChatSessionControl : UserControl
         ShowMentionPopup("");
     }
 
+    private void AttachFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not ChatSessionViewModel vm) return;
+
+        // No type filter: the CLI reads whatever it is handed, and the picker
+        // reaching only the kinds we inline would hide every other file the
+        // model can be asked about.
+        var picker = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Attach to message",
+            Filter = "All files (*.*)|*.*",
+            Multiselect = true,
+            CheckFileExists = true,
+        };
+
+        if (picker.ShowDialog() != true) return;
+
+        Attach(vm, picker.FileNames);
+        InputTextBox.Focus();
+    }
+
+    private void PromptBox_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        // Anything that is not a file is left alone, so text dragged out of an
+        // editor still drops into the textbox as text.
+        if (!TryGetDroppedPaths(e.Data, out _)) return;
+
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        DropHighlight.Visibility = Visibility.Visible;
+    }
+
+    private void PromptBox_PreviewDragLeave(object sender, DragEventArgs e)
+    {
+        // Hidden without asking where the cursor went. The textbox takes drops of
+        // its own, so crossing from the box's chrome into it also raises a leave,
+        // but WPF hands the leave and the next DragOver to us in one pass over
+        // the same mouse move, and the DragOver puts the highlight straight back.
+        // Leaving for good, and a drag cancelled with Escape, both end here too,
+        // which a test on the cursor position would miss: Escape reports the last
+        // point inside the box.
+        DropHighlight.Visibility = Visibility.Collapsed;
+    }
+
+    private void PromptBox_PreviewDrop(object sender, DragEventArgs e)
+    {
+        DropHighlight.Visibility = Visibility.Collapsed;
+
+        if (DataContext is not ChatSessionViewModel vm) return;
+        if (!TryGetDroppedPaths(e.Data, out var paths)) return;
+
+        Attach(vm, paths!);
+        // Otherwise the textbox would go on to handle the same drop.
+        e.Handled = true;
+        InputTextBox.Focus();
+    }
+
+    /// <summary>
+    /// Reads the paths a drag is carrying, if it is carrying any. The data
+    /// object belongs to the source process and can fail on either call, which
+    /// is not a reason to lose the drop's other formats.
+    /// </summary>
+    private static bool TryGetDroppedPaths(IDataObject data, out string[]? paths)
+    {
+        paths = null;
+        try
+        {
+            if (!data.GetDataPresent(DataFormats.FileDrop)) return false;
+            paths = data.GetData(DataFormats.FileDrop) as string[];
+        }
+        catch
+        {
+            return false;
+        }
+        return paths is { Length: > 0 };
+    }
+
+    private static void Attach(ChatSessionViewModel vm, IEnumerable<string?> paths)
+    {
+        foreach (var attachment in AttachmentReader.FromPaths(paths))
+            vm.Attach(attachment);
+    }
+
     private void InputTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_suppressTextChanged) return;
@@ -510,6 +654,29 @@ public partial class ChatSessionControl : UserControl
 
     private void InputTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // Ctrl+V is caught here rather than through DataObject.Pasting. A
+        // screenshot sits on the clipboard as a bitmap with no text format, so
+        // TextBoxBase.CanPaste is false, the paste command never runs, and the
+        // Pasting event never fires — the keystroke would be swallowed silently.
+        //
+        // Which clipboard formats lose to plain text is decided in TryRead: it
+        // is the one place that knows whether what it found is a bitmap, which
+        // text beats, or a file the user copied deliberately, which it does not.
+        if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        {
+            if (DataContext is ChatSessionViewModel vm)
+            {
+                var attachments = ClipboardAttachments.TryRead();
+                if (attachments.Count > 0)
+                {
+                    foreach (var attachment in attachments) vm.Attach(attachment);
+                    // Otherwise a file copied in Explorer would also paste its path.
+                    e.Handled = true;
+                    return;
+                }
+            }
+        }
+
         if (!MentionPopup.IsOpen) return;
 
         switch (e.Key)

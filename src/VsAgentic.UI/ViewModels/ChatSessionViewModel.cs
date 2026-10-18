@@ -117,14 +117,20 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             [SessionActivity.Completed] = new(CompletedFrames, TicksPerFrame: 4),
         };
 
-    private int _pendingUserPrompts;
     private int _tick;
     private SessionActivity _lastActivity = SessionActivity.Idle;
+
+    /// <summary>
+    /// Title of a session whose first message is an image with no text, until
+    /// a message with text gives the title model something to summarize.
+    /// </summary>
+    private const string PastedImageTitle = "Pasted image";
+
     private System.Windows.Threading.DispatcherTimer? _activityTimer;
 
     // Set when a turn ends unwatched, and cleared the instant the window is
     // looked at. A separate flag rather than folding into Activity's other
-    // inputs because, unlike Busy/_pendingUserPrompts, nothing about the
+    // inputs because, unlike Busy/IsAwaitingUser, nothing about the
     // chat service's state says "seen" — only the UI knows that.
     private bool _turnUnseen;
 
@@ -139,8 +145,40 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _displayTitle = "New Session";
 
+    /// <summary>
+    /// What the AI is doing right now, shown in the bar under the chat: the
+    /// step in flight and how long the turn has been running. A long task
+    /// reports itself here rather than by filling the transcript.
+    /// </summary>
+    [ObservableProperty]
+    private string _busyStatus = "Thinking...";
+
+    /// <summary>
+    /// When the current turn started. The bar counts from here, not from the
+    /// start of the step, so the number answers "how long have I been waiting".
+    /// </summary>
+    private DateTime? _turnStartedUtc;
+
+    /// <summary>
+    /// Title of the step in flight, or null between steps. Held with the id
+    /// that set it so a step completing out of order cannot blank the label
+    /// belonging to its successor.
+    /// </summary>
+    private string? _currentStep;
+    private string? _currentStepId;
+
+    /// <summary>
+    /// The user is being waited on exactly while a banner is on screen. Read
+    /// from the banner rather than counted: a counter has to be decremented on
+    /// every path that takes a banner down — answered, cancelled by Stop, the
+    /// handler throwing, one banner replacing another — and a single missed
+    /// decrement leaves the session claiming it waits for an answer the user
+    /// has already given.
+    /// </summary>
+    private bool IsAwaitingUser => ActiveBanner is not null;
+
     public SessionActivity Activity =>
-        _pendingUserPrompts > 0 ? SessionActivity.AwaitingUser :
+        IsAwaitingUser ? SessionActivity.AwaitingUser :
         IsBusy ? SessionActivity.Busy :
         _turnUnseen ? SessionActivity.Completed :
         SessionActivity.Idle;
@@ -215,9 +253,11 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>Text for the indicator strip under the chat input; empty hides it.</summary>
+    // While a turn runs, BusyStatus already covers both Busy and a banner being
+    // up (step or "Waiting for you", plus the elapsed time).
     public string StatusText => Activity switch
     {
-        SessionActivity.Busy => "Thinking...",
+        _ when IsBusy => BusyStatus,
         SessionActivity.AwaitingUser => "Waiting for input…",
         SessionActivity.Completed => "Done",
         _ => ""
@@ -228,7 +268,18 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         (Activity == SessionActivity.AwaitingUser && _options.FlashStatusBarWhileWaiting)
         || (Activity == SessionActivity.Completed && _options.FlashStatusBarWhenComplete);
 
-    partial void OnIsBusyChanged(bool value) => UpdateActivityIndicator();
+    partial void OnBusyStatusChanged(string value) => OnPropertyChanged(nameof(StatusText));
+
+    partial void OnIsBusyChanged(bool value)
+    {
+        // Both the elapsed count and the step label belong to one turn.
+        _turnStartedUtc = value ? DateTime.UtcNow : null;
+        _currentStep = null;
+        _currentStepId = null;
+        UpdateActivityIndicator();
+    }
+
+    partial void OnActiveBannerChanged(IBannerViewModel? value) => UpdateActivityIndicator();
 
     partial void OnSessionTitleChanged(string value) => UpdateDisplayTitle();
 
@@ -249,7 +300,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _tick = 0;
         }
 
-        if (CurrentAnimation is not null)
+        // IsBusy as well as the animation: the elapsed clock has to keep running
+        // while a permission or question banner is up, and when the user has
+        // switched the busy spinner off.
+        if (IsBusy || CurrentAnimation is not null)
         {
             EnsureActivityTimer();
             if (!_activityTimer!.IsEnabled) _activityTimer.Start();
@@ -259,6 +313,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             _activityTimer?.Stop();
         }
         UpdateDisplayTitle();
+        UpdateBusyStatus();
     }
 
     private void EnsureActivityTimer()
@@ -274,23 +329,60 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         _activityTimer.Tick += (_, _) =>
         {
             var animation = CurrentAnimation;
-            if (animation is null)
+            if (animation is not null)
             {
-                _activityTimer!.Stop();
-                return;
+                // A held animation wraps so the counter stays bounded; a transient
+                // one must keep counting up or it can never reach its duration.
+                _tick = animation.DurationTicks is null
+                    ? (_tick + 1) % animation.CycleTicks
+                    : _tick + 1;
             }
 
-            // A held animation wraps so the counter stays bounded; a transient
-            // one must keep counting up or it can never reach its duration.
-            _tick = animation.DurationTicks is null
-                ? (_tick + 1) % animation.CycleTicks
-                : _tick + 1;
-
-            if (animation.HasExpired(_tick))
+            // Kept running while busy so the elapsed clock under the chat ticks on.
+            if (!IsBusy && (animation is null || animation.HasExpired(_tick)))
                 _activityTimer!.Stop();
 
             UpdateDisplayTitle();
+            UpdateBusyStatus();
         };
+    }
+
+    /// <summary>
+    /// Rebuilds the line under the chat. Called on every spinner tick; the
+    /// text only changes once a second, and the generated setter drops a write
+    /// that would not change anything, so the binding is not woken for nothing.
+    /// </summary>
+    private void UpdateBusyStatus()
+    {
+        if (!IsBusy)
+        {
+            BusyStatus = "Thinking...";
+            return;
+        }
+
+        var label = IsAwaitingUser
+            ? "Waiting for you"
+            : _currentStep ?? "Thinking...";
+
+        if (_turnStartedUtc is null)
+        {
+            BusyStatus = label;
+            return;
+        }
+
+        var elapsed = DateTime.UtcNow - _turnStartedUtc.Value;
+        BusyStatus = $"{label} · {FormatElapsed(elapsed)}";
+    }
+
+    /// <summary>
+    /// Seconds up to a minute, then minutes and seconds — a bare "384s" stops
+    /// meaning anything once a task has been running for a while.
+    /// </summary>
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        var total = (int)elapsed.TotalSeconds;
+        if (total < 0) total = 0;
+        return total < 60 ? $"{total}s" : $"{total / 60}m {total % 60}s";
     }
 
     private void UpdateDisplayTitle()
@@ -319,6 +411,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public event Action<string, string, OutputBodyMode>? MessageBodySet;
     public event Action<string>? MessageCompleted;
     public event Action? AllCleared;
+
+    /// <summary>
+    /// Raised once the turn is over, so the view can stop presenting the last
+    /// run of steps as still in flight.
+    /// </summary>
+    public event Action? TurnEnded;
     public event Action<IEnumerable<ChatMessageData>>? MessagesRestored;
 
     /// <summary>
@@ -370,13 +468,49 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         _questionBroker = questionBroker;
 
         if (_permissionBroker is not null)
+        {
             _permissionBroker.PermissionRequested += OnPermissionBrokerRequested;
+            _permissionBroker.PendingCancelled += OnPermissionCancelled;
+        }
         if (_questionBroker is not null)
+        {
             _questionBroker.QuestionRequested += OnQuestionBrokerRequested;
+            _questionBroker.PendingCancelled += OnQuestionCancelled;
+        }
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+        chatService.BackgroundTasksChanged += OnChatServiceBackgroundTasksChanged;
 
         InitializeUsage(chatService, options.Value);
+    }
+
+    // ── Background tasks ──────────────────────────────────────────────────
+    // Commands the CLI runs with run_in_background. They outlive the turn that
+    // started them, so the strip above the input box is the only place that
+    // shows they are still running.
+
+    [ObservableProperty]
+    private bool _hasBackgroundTasks;
+
+    [ObservableProperty]
+    private string _backgroundTasksText = "";
+
+    [ObservableProperty]
+    private string _backgroundTasksTooltip = "";
+
+    private void OnChatServiceBackgroundTasksChanged(IReadOnlyList<BackgroundTask> tasks)
+    {
+        Dispatch(() =>
+        {
+            HasBackgroundTasks = tasks.Count > 0;
+            BackgroundTasksText = tasks.Count switch
+            {
+                0 => "",
+                1 => "Running in background: " + tasks[0].Description,
+                _ => $"{tasks.Count} tasks running in background",
+            };
+            BackgroundTasksTooltip = string.Join("\n", tasks.Select(t => "• " + t.Description));
+        });
     }
 
     private void OnChatServiceLoginRequired(string? errorMessage)
@@ -397,19 +531,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             try
             {
-                _pendingUserPrompts++;
-                UpdateActivityIndicator();
                 _logger.LogInformation(
                     "[VM] Permission prompt requested (id={Id}, tool={Tool})",
                     request.Id, request.ToolName);
                 ActiveBanner = new PermissionBannerViewModel(request, decision =>
                 {
-                    Dispatch(() =>
-                    {
-                        ActiveBanner = null;
-                        if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                        UpdateActivityIndicator();
-                    });
+                    Dispatch(() => ActiveBanner = null);
                     _permissionBroker?.Resolve(request.Id, decision);
                 });
             }
@@ -418,8 +545,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 // Without this guard the throw escapes Dispatcher.BeginInvoke,
                 // tears down the dispatcher loop, and leaves the chat hung.
                 _logger.LogError(ex, "[VM] Permission prompt handler crashed (id={Id})", request.Id);
-                if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                UpdateActivityIndicator();
+                ActiveBanner = null;
                 try { _permissionBroker?.Resolve(request.Id, PermissionDecision.Deny("Banner failed to display")); }
                 catch (Exception ex2) { _logger.LogError(ex2, "[VM] PermissionBroker.Resolve also failed"); }
             }
@@ -432,31 +558,76 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             try
             {
-                _pendingUserPrompts++;
-                UpdateActivityIndicator();
                 _logger.LogInformation(
                     "[VM] User question requested (toolUseId={Id}, questions={Count})",
                     request.ToolUseId, request.Questions.Count);
                 ActiveBanner = new QuestionCardViewModel(request, answers =>
                 {
-                    Dispatch(() =>
-                    {
-                        ActiveBanner = null;
-                        if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                        UpdateActivityIndicator();
-                    });
+                    Dispatch(() => ActiveBanner = null);
                     _questionBroker?.Resolve(request.ToolUseId, answers);
                 });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[VM] User question handler crashed (toolUseId={Id})", request.ToolUseId);
-                if (_pendingUserPrompts > 0) _pendingUserPrompts--;
-                UpdateActivityIndicator();
+                ActiveBanner = null;
                 try { _questionBroker?.Resolve(request.ToolUseId, new Dictionary<string, string>()); }
                 catch (Exception ex2) { _logger.LogError(ex2, "[VM] QuestionBroker.Resolve also failed"); }
             }
         });
+    }
+
+    /// <summary>
+    /// Stop answers every prompt in flight on the user's behalf, so the banner's
+    /// own callback never runs and the banner would otherwise stay on screen
+    /// long after its answer was sent. Take it down here, and say in the chat
+    /// why it went away.
+    /// </summary>
+    private void OnPermissionCancelled(string requestId)
+    {
+        Dispatch(() =>
+        {
+            if (ActiveBanner is not PermissionBannerViewModel banner || banner.RequestId != requestId)
+                return;
+
+            _logger.LogInformation("[VM] Permission prompt cancelled (id={Id})", requestId);
+            DismissActiveBanner($"_Stopped. The request to use **{banner.ToolName}** was denied._");
+        });
+    }
+
+    private void OnQuestionCancelled(string toolUseId)
+    {
+        Dispatch(() =>
+        {
+            if (ActiveBanner is not QuestionCardViewModel card || card.ToolUseId != toolUseId)
+                return;
+
+            _logger.LogInformation("[VM] User question cancelled (toolUseId={Id})", toolUseId);
+            DismissActiveBanner("_Stopped. The question was dismissed._");
+        });
+    }
+
+    /// <summary>Clears the banner and leaves a row in the chat saying so. Must
+    /// run on the UI thread.</summary>
+    private void DismissActiveBanner(string notice)
+    {
+        ActiveBanner = null;
+        UpdateActivityIndicator();
+
+        var noticeId = $"dismissed-{++_userMsgCounter}";
+        Items.Add(new ChatItemViewModel
+        {
+            Type = ChatItemType.Assistant,
+            Content = notice,
+            IsStreaming = false
+        });
+        MessageAdded?.Invoke(noticeId, ChatItemType.Assistant, new ChatMessageData
+        {
+            Id = noticeId,
+            Type = "Assistant",
+            Content = notice
+        });
+        RequestScroll();
     }
 
     /// <summary>
@@ -514,6 +685,33 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     Status = ParseEnum<OutputItemStatus>(msg.StatusText),
                     IsStreaming = false
                 });
+                List<string>? imageDataUris = null;
+                if (msg.ImageFileNames is { Count: > 0 })
+                {
+                    imageDataUris = new List<string>(msg.ImageFileNames.Count);
+                    foreach (var fileName in msg.ImageFileNames)
+                    {
+                        // A missing file just means one thumbnail short; the rest
+                        // of the conversation still restores. The same has to hold
+                        // for a file that is present but cannot be read — locked
+                        // by a virus scanner or OneDrive, denied, or a null entry
+                        // in the list. Without a catch here the outer one takes
+                        // over: no message is shown at all, and RestoreHistory is
+                        // skipped, so the next message starts a new CLI session
+                        // instead of continuing this one.
+                        try
+                        {
+                            var stored = await store.GetImageAsync(folder, sessionId.Value, fileName);
+                            if (stored is not null)
+                                imageDataUris.Add(stored.ToDataUri());
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "[VM] Could not restore an attached image ({FileName})", fileName);
+                        }
+                    }
+                }
+
                 restoreData.Add(new ChatMessageData
                 {
                     Id = $"restore-{msgIndex++}",
@@ -525,7 +723,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     BodyMode = msg.BodyMode ?? "Markdown",
                     ExpanderTitle = msg.ExpanderTitle ?? "",
                     Status = msg.StatusText,
-                    IsStreaming = false
+                    IsStreaming = false,
+                    Images = imageDataUris is { Count: > 0 } ? imageDataUris : null
                 });
             }
             if (restoreData.Count > 0)
@@ -547,13 +746,88 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         }
     }
 
-    private bool CanSend() => !IsBusy && !string.IsNullOrWhiteSpace(InputText);
+    // An attachment on its own is a perfectly good prompt — "what is wrong
+    // here?" is often implicit — so text is only required when nothing is
+    // attached.
+    private bool CanSend() =>
+        !IsBusy && (!string.IsNullOrWhiteSpace(InputText) || PendingAttachments.Count > 0);
+
+    /// <summary>
+    /// Images and files pasted into the input box, waiting to go out with the
+    /// next message. One list rather than two so the strip above the input keeps
+    /// them in the order they were pasted.
+    /// </summary>
+    public ObservableCollection<IChatAttachment> PendingAttachments { get; } = new();
+
+    /// <summary>
+    /// Attaches an image or a file to the next message. Called by the host when
+    /// the user pastes into the input box. Pasting the same path twice is a slip
+    /// rather than an intent, so those are dropped; a screenshot has no path to
+    /// compare and two identical ones are plausible enough to keep.
+    /// </summary>
+    public void Attach(IChatAttachment attachment)
+    {
+        if (attachment.SourcePath is { } path &&
+            PendingAttachments.Any(
+                a => string.Equals(a.SourcePath, path, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        PendingAttachments.Add(attachment);
+        SendCommand.NotifyCanExecuteChanged();
+    }
+
+    public void RemoveAttachment(IChatAttachment attachment)
+    {
+        PendingAttachments.Remove(attachment);
+        SendCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// Puts the attached paths above the user's text, so the model knows what it
+    /// has been handed before it reads the question about it. Images that came
+    /// from a file are named here too, even though their bytes travel inline:
+    /// without that, a paste of several photos arrives as thumbnails the model
+    /// cannot tell apart, next to a list of the ones that did not fit inline.
+    /// </summary>
+    private static string WithFileReferences(string text, IReadOnlyList<IChatAttachment> attachments)
+    {
+        // Backticks stop Markdown from eating the backslashes when the message is
+        // rendered back into the chat, and mark the path as literal for the CLI.
+        var list = string.Join("\n", attachments.Select(a => $"- `{a.SourcePath}`"));
+        var header = attachments.Count == 1 ? "Attached file:" : "Attached files:";
+
+        return string.IsNullOrEmpty(text)
+            ? $"{header}\n{list}"
+            : $"{header}\n{list}\n\n{text}";
+    }
 
     [RelayCommand(CanExecute = nameof(CanSend))]
     private async Task SendAsync()
     {
         var message = InputText.Trim();
         InputText = "";
+
+        var images = PendingAttachments.OfType<ChatImageAttachment>().ToList();
+        // In the order they were pasted, so the names line up with the
+        // thumbnails the message carries.
+        var named = PendingAttachments.Where(a => a.SourcePath is not null).ToList();
+        var sentImages = images.Count > 0 ? images : null;
+        PendingAttachments.Clear();
+        SendCommand.NotifyCanExecuteChanged();
+
+        // Attached files are named in the prompt rather than uploaded: the CLI
+        // reads them off disk with the same tools it uses for the rest of the
+        // project. Listing them in the message itself also leaves a record in
+        // the transcript of what went out.
+        if (named.Count > 0)
+            message = WithFileReferences(message, named);
+
+        // Written next to the session so reopening it shows the images again.
+        var storedImageNames = sentImages is null
+            ? null
+            : await PersistImagesAsync(sentImages);
 
         var userMsgId = $"user-{++_userMsgCounter}";
         Items.Add(new ChatItemViewModel
@@ -567,7 +841,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             Id = userMsgId,
             Type = "User",
             Content = message,
-            Title = "You"
+            Title = "You",
+            Images = sentImages?.Select(i => i.ToDataUri()).ToList()
         });
         RequestScroll();
 
@@ -576,6 +851,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             ItemType = ChatItemType.User.ToString(),
             Content = message,
             Title = "You",
+            ImageFileNames = storedImageNames,
             CreatedUtc = DateTime.UtcNow
         });
 
@@ -599,10 +875,22 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Generate a title from the first user message (fire-and-forget, non-blocking).
-        // Skipped when the user already named the session by hand.
-        var isFirstMessage = Items.Count(i => i.Type == ChatItemType.User) == 1;
-        if (isFirstMessage && !HasCustomTitle)
+        // Generate a title from the first user message that has text (fire-and-forget,
+        // non-blocking). Skipped when the user already named the session by hand.
+        // The title model only sees text: handed an image-only prompt it names the
+        // session after the empty message ("Empty message, no request given"), so
+        // such a session gets a placeholder until text arrives.
+        var userMessages = Items.Where(i => i.Type == ChatItemType.User).ToList();
+        var hasText = !string.IsNullOrWhiteSpace(message);
+        var isFirstMessage = userMessages.Count == 1;
+        var isFirstText = hasText && userMessages.Count(i => !string.IsNullOrWhiteSpace(i.Content)) == 1;
+
+        if (isFirstMessage && !hasText && !HasCustomTitle)
+        {
+            SessionTitle = PastedImageTitle;
+            PersistTitleUpdateFireAndForget(PastedImageTitle);
+        }
+        else if (isFirstText && !HasCustomTitle)
         {
             _ = Task.Run(async () =>
             {
@@ -628,7 +916,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         var token = _sendCts.Token;
         try
         {
-            await foreach (var _ in _chatService.SendMessageAsync(message, token))
+            await foreach (var _ in _chatService.SendMessageAsync(message, sentImages, token))
             {
                 // Output is handled by listener callbacks
             }
@@ -687,6 +975,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             // turn end and there is nothing left to announce.
             _turnUnseen = !IsSessionFocused;
             IsBusy = false;
+            TurnEnded?.Invoke();
         }
         RequestScroll();
     }
@@ -704,6 +993,9 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // those TCSs (they're created with CancellationToken.None), so without
         // explicitly resolving them here a stuck banner leaves the chat hung
         // even after the user clicks Stop.
+        //
+        // Both calls raise PendingCancelled, which is what takes the banner off
+        // the screen — see OnPermissionCancelled / OnQuestionCancelled.
         try { _questionBroker?.CancelAllPending(); }
         catch (Exception ex) { _logger.LogError(ex, "[VM] Stop: questionBroker.CancelAllPending failed"); }
         try { _permissionBroker?.CancelAllPending(); }
@@ -753,8 +1045,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 Title = item.Title,
                 Status = item.Status.ToString(),
                 ExpanderTitle = expanderTitle,
-                IsStreaming = streaming
+                IsStreaming = streaming,
+                // For a tool step this is the formatted input — the path being
+                // read, the command being run. The folded row takes its first
+                // line, which is what turns "Using Read" into something worth
+                // reading while the task is still going.
+                Body = type == ChatItemType.ToolStep ? item.Body : null
             });
+
+            _currentStep = expanderTitle;
+            _currentStepId = item.Id;
+            UpdateBusyStatus();
             RequestScroll();
         });
     }
@@ -812,6 +1113,15 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
                 MessageCompleted?.Invoke(item.Id);
 
+                // Back to the plain "Thinking..." until the next step names
+                // itself — but only if this is the step the bar is showing.
+                if (_currentStepId == item.Id)
+                {
+                    _currentStep = null;
+                    _currentStepId = null;
+                    UpdateBusyStatus();
+                }
+
                 _activeItems.TryRemove(item.Id, out _);
                 RequestScroll();
 
@@ -833,6 +1143,37 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     }
 
     // --- Persistence helpers (fire-and-forget) ---
+
+    /// <summary>
+    /// Writes attachments into the session folder before the message that
+    /// references them is appended, so a reopened session never points at files
+    /// that are not there yet. Awaited rather than fire-and-forget for that
+    /// reason. Returns null when persistence is off or every write failed.
+    /// </summary>
+    private async Task<List<string>?> PersistImagesAsync(IReadOnlyList<ChatImageAttachment> images)
+    {
+        var store = ActiveStore;
+        var folder = ActiveFolder;
+        var sessionId = ActiveSessionId;
+        if (store is null || folder is null || !sessionId.HasValue) return null;
+
+        var names = new List<string>(images.Count);
+        foreach (var image in images)
+        {
+            try
+            {
+                names.Add(await store.SaveImageAsync(folder, sessionId.Value, image));
+            }
+            catch (Exception ex)
+            {
+                // The message still goes out with the image inline; only the
+                // stored copy is lost, so this must not abort the send.
+                _logger.LogWarning(ex, "[VM] Could not store attached image");
+            }
+        }
+
+        return names.Count > 0 ? names : null;
+    }
 
     private void PersistMessageFireAndForget(PersistedMessage message)
     {
@@ -931,6 +1272,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
                 _chatService.ModelChanged -= OnChatServiceModelChanged;
+                _chatService.BackgroundTasksChanged -= OnChatServiceBackgroundTasksChanged;
             }
         }
         catch { }
