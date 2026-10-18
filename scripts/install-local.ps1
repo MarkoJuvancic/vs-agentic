@@ -94,11 +94,15 @@ function Get-VsixVersion($path) {
 
 # Every per-user extension directory currently holding our Identity Id.
 # More than one means a previous uninstall left a copy behind.
+# Experimental Instance hives (18.0_<id>Exp) are skipped: VSIXInstaller /u:
+# only touches the normal instance, so the copy F5 deployed there would
+# always survive the uninstall and fail the check below.
 function Get-InstalledCopies {
     $root = Join-Path $env:LocalAppData 'Microsoft\VisualStudio'
     if (-not (Test-Path $root)) { return @() }
     return @(
         Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*Exp' } |
             ForEach-Object { Join-Path $_.FullName 'Extensions' } |
             Where-Object { Test-Path $_ } |
             Get-ChildItem -Directory -ErrorAction SilentlyContinue |
@@ -146,102 +150,103 @@ if (-not (Test-Path $vsixInstaller)) {
 }
 Write-Host "Visual Studio: $vsInstallPath" -ForegroundColor DarkGray
 
-# --- 3. Bump the patch version (unless -NoBump or -SkipBuild) -----------------
-if ($shouldBump) {
-    Write-Step "Bumping version"
-
-    # Edited as text, not via [xml].Save(): the XmlDocument round-trip reflows
-    # every wrapped attribute onto one line and drops the trailing newline,
-    # turning a one-digit bump into a whole-file diff.
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $text    = [System.IO.File]::ReadAllText($manifest)
-    $pattern = '(?<head><Identity\b[^>]*?\bVersion=")(?<ver>[^"]+)(?<tail>")'
-
-    $match = [regex]::Match($text, $pattern)
-    if (-not $match.Success) {
-        throw "Could not find the Identity Version attribute in '$manifest'; bump it by hand."
-    }
-
-    $current = $match.Groups['ver'].Value
-    $parts   = $current.Split('.')
-    if ($parts.Count -lt 3) {
-        throw "Version '$current' in the manifest is not in major.minor.patch form; bump it by hand."
-    }
-    $parts[2] = ([int]$parts[2] + 1).ToString()
-    $new = $parts -join '.'
-
-    $text = $text.Remove($match.Index, $match.Length).Insert($match.Index, "$($match.Groups['head'].Value)$new$($match.Groups['tail'].Value)")
-    [System.IO.File]::WriteAllText($manifest, $text, $utf8Bom)
-
-    Write-Host "  $current -> $new" -ForegroundColor Green
-    Write-Host "  (the publish workflow rewrites this from the git tag, so a local bump is safe)" -ForegroundColor DarkGray
-}
-
-[xml]$manifestXml = Get-Content $manifest
-$manifestVersion = $manifestXml.PackageManifest.Metadata.Identity.Version
-Write-Host "Manifest version: $manifestVersion" -ForegroundColor DarkGray
-
-$before = @(Get-InstalledCopies)
-if ($before.Count -eq 0) {
-    Write-Host "Currently installed: none" -ForegroundColor DarkGray
-} else {
-    Write-Host "Currently installed: $(($before | ForEach-Object { $_.Version }) -join ', ')" -ForegroundColor DarkGray
-}
-
-# --- 4. Build -----------------------------------------------------------------
-if ($SkipBuild) {
-    Write-Step "Skipping build (-SkipBuild)"
-} else {
-    # DetokenizeVsixManifestSource (Microsoft.VsSDK.targets) writes
-    # obj\<config>\net472\extension.vsixmanifest only when that file doesn't
-    # already exist - it never re-detokenizes a stale one. Left alone, a
-    # version bump (or any other manifest edit) is silently dropped on the
-    # next build: the packed .vsix keeps whatever version was baked in the
-    # first time obj\ was populated. Delete the stale copy so it's always
-    # regenerated from the current source.extension.vsixmanifest.
-    $intermediateManifest = Join-Path $repoRoot "src\VsAgentic.VSExtension\obj\$Configuration\net472\extension.vsixmanifest"
-    if (Test-Path $intermediateManifest) {
-        Remove-Item $intermediateManifest -Force
-    }
-
-    Write-Step "Building $Configuration"
-    & dotnet build $solution -c $Configuration -v minimal
-    if ($LASTEXITCODE -ne 0) {
-        throw "Build failed with exit code $LASTEXITCODE."
-    }
-}
-
-if (-not (Test-Path $vsixPath)) {
-    throw "VSIX not found at '$vsixPath'. Build the solution first, or drop -SkipBuild."
-}
-$sizeMb = [math]::Round((Get-Item $vsixPath).Length / 1MB, 2)
-Write-Host "VSIX: $vsixPath ($sizeMb MB)" -ForegroundColor DarkGray
-
-# The artifact, not the manifest, is what gets installed. They drift whenever a
-# bump run bumps the version and then doesn't complete a build, and
-# -SkipBuild can't reconcile them at all.
-$version = Get-VsixVersion $vsixPath
-Write-Host "Version to install: $version" -ForegroundColor DarkGray
-if ($version -ne $manifestVersion) {
-    Write-Host ""
-    Write-Host "The built VSIX is $version but source.extension.vsixmanifest says $manifestVersion." -ForegroundColor Red
-    if ($SkipBuild) {
-        throw "Stale VSIX in bin\$Configuration. Drop -SkipBuild so the $manifestVersion artifact gets built."
-    }
-    # The build step above already deletes obj\<config>\net472\extension.vsixmanifest
-    # before building, which is what makes DetokenizeVsixManifestSource (in
-    # Microsoft.VsSDK.targets - it only writes that file when missing) pick up
-    # the current manifest. Reaching this point means that delete didn't happen
-    # or didn't take - e.g. a $Configuration/target framework mismatch.
-    throw "The build did not pick up the manifest version."
-}
-
 # The bump only needs to exist on disk long enough to get baked into the
-# .vsix above - revert it now so the default bump never leaves a dirty
-# working tree for a local-only version bump.
-if ($shouldBump) {
-    & git -C $repoRoot checkout -- $manifest
-    Write-Host "Reverted local version bump in source.extension.vsixmanifest (not checked in)." -ForegroundColor DarkGray
+# .vsix. The original bytes are written back in the finally below, whether the
+# build succeeds, fails, or is interrupted - and because it is the original
+# file rather than git's copy, any uncommitted edits to the manifest survive.
+$originalManifest = $null
+try {
+    # --- 3. Bump the patch version (unless -NoBump or -SkipBuild) -------------
+    if ($shouldBump) {
+        Write-Step "Bumping version"
+
+        # Edited as text, not via [xml].Save(): the XmlDocument round-trip reflows
+        # every wrapped attribute onto one line and drops the trailing newline,
+        # turning a one-digit bump into a whole-file diff.
+        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        $text    = [System.IO.File]::ReadAllText($manifest)
+        $pattern = '(?<head><Identity\b[^>]*?\bVersion=")(?<ver>[^"]+)(?<tail>")'
+
+        $match = [regex]::Match($text, $pattern)
+        if (-not $match.Success) {
+            throw "Could not find the Identity Version attribute in '$manifest'; bump it by hand."
+        }
+
+        $current = $match.Groups['ver'].Value
+        $parts   = $current.Split('.')
+        if ($parts.Count -lt 3) {
+            throw "Version '$current' in the manifest is not in major.minor.patch form; bump it by hand."
+        }
+        $parts[2] = ([int]$parts[2] + 1).ToString()
+        $new = $parts -join '.'
+
+        $text = $text.Remove($match.Index, $match.Length).Insert($match.Index, "$($match.Groups['head'].Value)$new$($match.Groups['tail'].Value)")
+        $originalManifest = [System.IO.File]::ReadAllBytes($manifest)
+        [System.IO.File]::WriteAllText($manifest, $text, $utf8Bom)
+
+        Write-Host "  $current -> $new" -ForegroundColor Green
+        Write-Host "  (the publish workflow rewrites this from the git tag, so a local bump is safe)" -ForegroundColor DarkGray
+    }
+
+    [xml]$manifestXml = Get-Content $manifest
+    $manifestVersion = $manifestXml.PackageManifest.Metadata.Identity.Version
+    Write-Host "Manifest version: $manifestVersion" -ForegroundColor DarkGray
+
+    $before = @(Get-InstalledCopies)
+    if ($before.Count -eq 0) {
+        Write-Host "Currently installed: none" -ForegroundColor DarkGray
+    } else {
+        Write-Host "Currently installed: $(($before | ForEach-Object { $_.Version }) -join ', ')" -ForegroundColor DarkGray
+    }
+
+    # --- 4. Build -------------------------------------------------------------
+    if ($SkipBuild) {
+        Write-Step "Skipping build (-SkipBuild)"
+    } else {
+        # The VSSDK packs obj\<config>\net472\extension.vsixmanifest, not the
+        # source manifest. With MSBuild.exe and an obj\ left over from before the
+        # source manifest changed, that intermediate copy has been seen to stay
+        # stale, so the .vsix carried the old version. The cause is not known.
+        # Deleting it makes the build regenerate it from the current source.
+        $intermediateManifest = Join-Path $repoRoot "src\VsAgentic.VSExtension\obj\$Configuration\net472\extension.vsixmanifest"
+        if (Test-Path $intermediateManifest) {
+            Remove-Item $intermediateManifest -Force
+        }
+
+        Write-Step "Building $Configuration"
+        & dotnet build $solution -c $Configuration -v minimal
+        if ($LASTEXITCODE -ne 0) {
+            throw "Build failed with exit code $LASTEXITCODE."
+        }
+    }
+
+    if (-not (Test-Path $vsixPath)) {
+        throw "VSIX not found at '$vsixPath'. Build the solution first, or drop -SkipBuild."
+    }
+    $sizeMb = [math]::Round((Get-Item $vsixPath).Length / 1MB, 2)
+    Write-Host "VSIX: $vsixPath ($sizeMb MB)" -ForegroundColor DarkGray
+
+    # The artifact, not the manifest, is what gets installed. They drift whenever
+    # -SkipBuild runs against a stale bin\, or the intermediate manifest above
+    # was not regenerated.
+    $version = Get-VsixVersion $vsixPath
+    Write-Host "Version to install: $version" -ForegroundColor DarkGray
+    if ($version -ne $manifestVersion) {
+        Write-Host ""
+        Write-Host "The built VSIX is $version but source.extension.vsixmanifest says $manifestVersion." -ForegroundColor Red
+        if ($SkipBuild) {
+            throw "Stale VSIX in bin\$Configuration. Drop -SkipBuild so the $manifestVersion artifact gets built."
+        }
+        # The build step above deletes the intermediate manifest first, so reaching
+        # this point means that delete didn't take - e.g. a $Configuration/target
+        # framework mismatch with the obj\ path.
+        throw "The build did not pick up the manifest version."
+    }
+} finally {
+    if ($null -ne $originalManifest) {
+        [System.IO.File]::WriteAllBytes($manifest, $originalManifest)
+        Write-Host "Restored source.extension.vsixmanifest (the local version bump is not kept)." -ForegroundColor DarkGray
+    }
 }
 
 # --- 5. Uninstall the previous copy -------------------------------------------

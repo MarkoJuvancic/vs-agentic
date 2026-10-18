@@ -135,7 +135,8 @@ To use it for a few days locally, before creating a PR to contribute, use the fo
 To run it locally, it needs to bump the patch version in `source.extension.vsixmanifest` (e.g. 3.5.0 → 3.5.1) to keep your local build ahead of the Marketplace — see [Keep your local version ahead of the Marketplace](#keep-your-local-version-ahead-of-the-marketplace).
 The bump is hidden as part of the script running:
 
-* The script edits the manifest, builds, confirms the new version is baked into the `.vsix`, and then reverts the manifest with `git checkout`.
+* The script saves the manifest, bumps it, builds, and confirms the new version is baked into the `.vsix`.
+  It then writes the saved original back — even if the build fails or you interrupt it — so any uncommitted edits you had in the manifest are kept.
 
 * Your working tree is left clean, so the bump never shows up as a change to commit.
 
@@ -172,14 +173,15 @@ The check runs before the bump is reverted, so it compares against the bumped ve
 `-SkipBuild` never bumps, precisely so that it compares the stale artifact against the committed manifest rather than a version that was never built.
 If you hit that error, just re-run without `-SkipBuild`.
 
-If a run stops between the bump and the revert (a failed build, or the version-mismatch error above), the bumped manifest is left in your working tree.
-Discard it with `git checkout -- src/VsAgentic.VSExtension/source.extension.vsixmanifest` before the next run, otherwise that run bumps on top of it.
-
 #### What to look at it there is*successful* build but the old version remains
 
-The VSSDK packs `obj\<config>\<tfm>\extension.vsixmanifest`, not `source.extension.vsixmanifest` directly. `DetokenizeVsixManifestSource` (Microsoft.VSSDK.BuildTools 17.14.2120) generates that intermediate file **only when it does not already exist** — and it reports the write in `FileWrites` either way, so even a `-v:diag` build log shows the target running normally.
+The VSSDK packs `obj\<config>\<tfm>\extension.vsixmanifest`, not `source.extension.vsixmanifest` directly.
+That intermediate copy has been seen to go stale.
+With `MSBuild.exe` from VS 18 (MSBuild 18.6.3, Microsoft.VSSDK.BuildTools 17.14.2120), a merge raised the source manifest version, and two builds in a row with the earlier `obj` folder packed a `.vsix` still stamped with the old version.
+The DLLs were current; only the manifest was old.
+It has not been reproduced with `dotnet build`, and the cause in the VSSDK targets is not known.
 
-The effect is that on any incremental build, every edit to `source.extension.vsixmanifest` is silently discarded: version, `DisplayName`, `Description`, `Prerequisites`, `Assets`. The packed `.vsix` keeps whatever the manifest said the last time `obj` was clean. Version is the one that bites, because VSIXInstaller keys on it — you bump, the build succeeds, and the `.vsix` is still stamped with the old version, which then refuses to install over itself.
+Version is the one that bites, because VSIXInstaller keys on it — the build succeeds, but the `.vsix` is still stamped with the old version, which then refuses to install over itself.
 
 `VsAgentic.VSExtension.csproj` has a `ForceRefreshIntermediateVsixManifest` target that deletes the intermediate when the source manifest is newer, so the detokenizer regenerates it. Its `Inputs`/`Outputs` make it a no-op otherwise. If you ever see the version mismatch error again, delete `obj\<config>\net472\extension.vsixmanifest` by hand and rebuild — that is the whole fix, and a full `Clean` is not necessary.
 
