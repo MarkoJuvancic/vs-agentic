@@ -315,7 +315,7 @@ The `claude` CLI and `vsagentic-mcp-permissions.exe` are separate processes, so 
 
 ## Conventions
 
-- **Versioning** — bump `Version` in `src/VsAgentic.VSExtension/source.extension.vsixmanifest` in the same commit as your change. This is the pattern throughout `git log`, and it makes it possible to tell which build a user is running from the extension folder alone.
+- **Versioning** — don't change the version in your PRs, this will be sorted by the maintainer when the code is includes a release.
 - **Releases** — pushing a `v*.*.*` tag runs `.github/workflows/publish-vsix.yml`, which rewrites the manifest version from the tag, builds, publishes to the VS Marketplace, and cuts a GitHub release with a commit-derived changelog. The tag is the source of truth for the published version.
 - **Layering** — each project references only the one below it (`VSExtension → UI → Services`). Keep VS SDK types out of `VsAgentic.UI` and `VsAgentic.Services`; the Console host depends on that separation holding.
 - **Permission flow** — the CLI cannot call back into the extension, so `vsagentic-mcp-permissions.exe` (a stdio MCP server, zipped into `VsAgentic.Services` as an embedded resource) relays approvals over a named pipe to `PermissionPipeServer` → `IPermissionBroker` / `IUserQuestionBroker` → the banner UI. Read `PermissionPipeServer`'s doc comment before changing anything in `VsAgentic.Services/ClaudeCli/`.
