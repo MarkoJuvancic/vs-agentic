@@ -273,6 +273,17 @@ public partial class ChatSessionControl : UserControl
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Opens the find bar over the chat. Called by the tool window for Edit.Find.
+    /// </summary>
+    public void OpenFind() => _ = ChatWebView.OpenFindAsync();
+
+    /// <summary>
+    /// Steps through the matches. Called by the tool window for Edit.FindNext
+    /// (+1) and Edit.FindPrevious (-1).
+    /// </summary>
+    public void FindNext(int direction) => _ = ChatWebView.FindNextAsync(direction);
+
     private void OnZoomChangeRequested(int step) => ChatZoom.Step(step);
 
     private void OnZoomChanged(double level)
