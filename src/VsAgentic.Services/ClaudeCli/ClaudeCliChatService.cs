@@ -426,6 +426,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         if (turn.RetryItem == null)
         {
+            CloseStreamedBlocks(turn);
             turn.RetryItem = new OutputItem
             {
                 Id = Guid.NewGuid().ToString("N"),
@@ -485,6 +486,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             if (turn.CompactItem != null) return;
             _logger.LogInformation("[ClaudeCli] Compacting the conversation");
+            CloseStreamedBlocks(turn);
             turn.CompactItem = new OutputItem
             {
                 Id = Guid.NewGuid().ToString("N"),
@@ -501,6 +503,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             var error = CliProcessInfo.ReadString(evt, "compact_error");
             _logger.LogWarning("[ClaudeCli] Compaction failed: {Error}", error);
             turn.CompactItem = null;
+            turn.CompactError = error;
             item.Title = "Compaction failed";
             item.Body = error;
             item.Status = OutputItemStatus.Error;
@@ -539,6 +542,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         turn.CompactItem = null;
         if (item == null)
         {
+            CloseStreamedBlocks(turn);
             item = new OutputItem
             {
                 Id = Guid.NewGuid().ToString("N"),
@@ -627,6 +631,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         var newline = text.IndexOf('\n');
         var firstLine = (newline < 0 ? text : text.Substring(0, newline)).Trim();
         title ??= firstLine;
+
+        var turn = ActiveTurn();
+        if (turn != null) CloseStreamedBlocks(turn);
 
         var item = new OutputItem
         {
@@ -818,7 +825,24 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         var text = block.TryGetProperty("text", out var tp) ? tp.GetString() ?? "" : "";
         if (string.IsNullOrEmpty(text)) return;
 
+        if (turn.CompactError != null && text.Trim() == turn.CompactError.Trim())
+        {
+            turn.CompactError = null;
+            return;
+        }
+
         AppendResponseText(turn, text);
+    }
+
+    /// <summary>
+    /// A session line follows the reply or thinking streamed before it, so those
+    /// are complete. Closing them here keeps the order steps complete in, which is
+    /// the order a reopened session shows them in, the same as on screen.
+    /// </summary>
+    private void CloseStreamedBlocks(TurnState turn)
+    {
+        FinalizeThinkingItem(turn);
+        FinalizeResponseItem(turn);
     }
 
     private void AppendResponseText(TurnState turn, string text)
@@ -1644,6 +1668,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         public int RetryCount;
         public string? RetryReason;
         public OutputItem? CompactItem;
+        // The CLI repeats a failed compaction's error as a reply; the line already shows it.
+        public string? CompactError;
 
         // Set when the CLI flags an assistant message as "authentication_failed".
         public bool AuthFailed;
