@@ -16,6 +16,7 @@ using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Serilog;
 using VsAgentic.Services.Configuration;
+using VsAgentic.VSExtension.Editor;
 using VsAgentic.VSExtension.Options;
 using VsAgentic.VSExtension.ToolWindows;
 using Task = System.Threading.Tasks.Task;
@@ -46,6 +47,13 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
     private uint _solutionEventsCookie;
     private Action<double>? _persistZoom;
     private DispatcherTimer? _zoomSaveTimer;
+    private EditorContextTracker? _editorContext;
+
+    // For "Add to VsAgentic Chat": the open chat windows, the one the user was
+    // in last, and an editor context waiting for a window still being opened.
+    private readonly Dictionary<string, ChatSessionToolWindow> _chatWindows = new();
+    private string? _lastActiveSessionId;
+    private EditorContext? _pendingEditorContext;
 
     public static bool IsLoaded => _instance is not null;
 
@@ -91,6 +99,15 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         ChatWebView.FileLinkRequested += OnFileLinkRequested;
 
         InitializeZoom();
+
+        if (await GetServiceAsync(typeof(SVsShellMonitorSelection)) is IVsMonitorSelection monitorSelection)
+        {
+            // Read on every call, so turning the option off in Tools → Options
+            // takes effect in chats that are already open.
+            var editorOptions = (VsAgenticOptionsPage?)GetDialogPage(typeof(VsAgenticOptionsPage));
+            _editorContext = new EditorContextTracker(
+                monitorSelection, () => editorOptions?.SuggestEditorContext ?? true);
+        }
 
         // Listen for solution open/close/switch events
         if (await GetServiceAsync(typeof(SVsSolution)) is IVsSolution solutionService)
@@ -286,6 +303,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         var vmLogger = provider.GetService<Microsoft.Extensions.Logging.ILogger<ChatSessionViewModel>>();
 
         var vm = new ChatSessionViewModel(chatService, outputListener, optionsAccessor, permissionBroker, questionBroker, vmLogger);
+        vm.EditorContextProvider = _editorContext;
 
         // The status bar pickers only change this session; persisting the choice so
         // the next one starts the same way is the host's side of the deal.
@@ -355,6 +373,51 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         }
     }
 
+    /// <summary>
+    /// Attaches the editor's selection, or the whole file, to the chat the
+    /// user was last in, and brings that chat forward. With no chat open, a new
+    /// session takes it.
+    /// </summary>
+    public static async Task AddEditorContextToChatAsync()
+    {
+        if (_instance is null) return;
+
+        await _instance.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+        if (_instance._editorContext?.ReadActive() is not { } context)
+            return;
+
+        _instance._pendingEditorContext = context;
+
+        var sessions = _instance._sessionListViewModel;
+        if (_instance._lastActiveSessionId is { } id &&
+            _instance._chatWindows.ContainsKey(id) &&
+            sessions?.Sessions.FirstOrDefault(s => s.Id == id) is { } session)
+        {
+            await OpenOrActivateSessionAsync(session);
+        }
+        else if (sessions is not null)
+        {
+            // Opens through SessionOpenRequested, which delivers the context
+            // once the window is up.
+            await sessions.NewSessionAsync();
+        }
+    }
+
+    private void DeliverPendingEditorContext(string sessionId)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        if (_pendingEditorContext is not { } context ||
+            !_chatWindows.TryGetValue(sessionId, out var window))
+        {
+            return;
+        }
+
+        _pendingEditorContext = null;
+        window.ChatControl.AttachFromEditor(context);
+    }
+
     private static async Task OpenOrActivateSessionAsync(SessionInfo session)
     {
         if (_instance is null) return;
@@ -374,6 +437,9 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 {
                     existingFrame.Show();
                 }
+
+                _instance._lastActiveSessionId = session.Id;
+                _instance.DeliverPendingEditorContext(session.Id);
             }
             catch (Exception ex)
             {
@@ -419,6 +485,14 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                     // Wire up the UI event handlers BEFORE restoring messages,
                     // so the MessagesRestored event is received by the WebView.
                     chatWindow.ChatControl.Initialize(viewModel);
+
+                    _instance._chatWindows[session.Id] = chatWindow;
+                    _instance._lastActiveSessionId = session.Id;
+                    chatWindow.ChatControl.IsKeyboardFocusWithinChanged += (_, e) =>
+                    {
+                        if (e.NewValue is true && _instance is not null)
+                            _instance._lastActiveSessionId = session.Id;
+                    };
 
                     // Enable persistence on the view model
                     if (session.PersistedId.HasValue && _instance._sessionStore is not null && _instance._solutionDirectory is not null)
@@ -483,6 +557,9 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                     chatWindow.Closed += () =>
                     {
                         _instance?._sessionWindowMap.Remove(session.Id);
+                        _instance?._chatWindows.Remove(session.Id);
+                        if (_instance?._lastActiveSessionId == session.Id)
+                            _instance._lastActiveSessionId = null;
                         session.PropertyChanged -= onSessionChanged;
                         session.IsActive = false;
                         viewModel.Dispose();
@@ -493,6 +570,8 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                 {
                     frame.Show();
                 }
+
+                _instance.DeliverPendingEditorContext(session.Id);
             }
         }
         catch (Exception ex)
@@ -780,6 +859,9 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
         if (disposing)
         {
             ChatWebView.FileLinkRequested -= OnFileLinkRequested;
+
+            _editorContext?.Dispose();
+            _editorContext = null;
 
             if (_persistZoom is not null)
             {

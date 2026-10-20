@@ -67,6 +67,12 @@ public class VsAgenticOptionsPage : DialogPage
     [DefaultValue(100)]
     public int ZoomPercent { get; set; } = 100;
 
+    [Category("Editor context")]
+    [DisplayName("Suggest the active file and selection")]
+    [Description("Offer the file open in the editor, and the lines selected in it, as a faded chip above the chat input. Nothing is sent until you click the chip; it then goes out with the next message like an attached file. Selected text is sent as well, so unsaved changes reach Claude too.")]
+    [DefaultValue(true)]
+    public bool SuggestEditorContext { get; set; } = true;
+
     [Category("Sessions")]
     [DisplayName("Keep days of activity")]
     [Description("When the extension starts, sessions whose last activity is older than this many days are deleted. Default: 30. Set to 0 to disable cleanup.")]
