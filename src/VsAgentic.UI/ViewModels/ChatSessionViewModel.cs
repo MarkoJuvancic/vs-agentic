@@ -18,6 +18,7 @@ namespace VsAgentic.UI.ViewModels;
 public partial class ChatSessionViewModel : ObservableObject, IDisposable
 {
     private readonly IChatService? _chatService;
+    private readonly VsAgenticOptions _options;
     private IDisposable? _serviceScope;
     private readonly ConcurrentDictionary<string, ChatItemViewModel> _activeItems = new();
     private int _userMsgCounter;
@@ -45,21 +46,101 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     /// </summary>
     public bool HasCustomTitle { get; set; }
 
+    // Realtime activity indicator: the tool window caption carries an animated
+    // prefix describing what the session is doing. Host bindings (e.g. the VS
+    // tool window caption) should use DisplayTitle; SessionTitle stays plain
+    // for the session list entry so the sidebar doesn't flicker.
+    //
+    // One animation runs at a time — whichever TitleAnimations maps the current
+    // Activity to — so the tick counter only ever serves that one and is reset
+    // on every transition. Animations therefore never have to be kept in phase
+    // with each other, and adding one is an entry in the table below.
+
+    /// <summary>
+    /// One caption animation. Frames must be equal width and carry their own
+    /// trailing space: the caption is a plain string with no way to hide a
+    /// glyph, so a narrower frame shifts the title text every time it shows.
+    /// </summary>
+    /// <param name="Frames">Glyphs to cycle through, in order.</param>
+    /// <param name="TicksPerFrame">Timer ticks each frame is held for.</param>
+    /// <param name="DurationTicks">
+    /// Ticks before the animation stops on its own, for states that are
+    /// transient rather than held. Null loops until the state changes.
+    /// </param>
+    private sealed record TitleAnimation(string[] Frames, int TicksPerFrame, int? DurationTicks = null)
+    {
+        /// <summary>Ticks for one full pass through <see cref="Frames"/>.</summary>
+        public int CycleTicks => Frames.Length * TicksPerFrame;
+
+        public string FrameAt(int tick) => Frames[(tick / TicksPerFrame) % Frames.Length];
+
+        public bool HasExpired(int tick) => DurationTicks is int d && tick >= d;
+    }
+
+    private static readonly string[] SpinnerFrames =
+        { "⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ " };
+
+    // Two hand glyphs rather than a hand alternating with blank, for the
+    // equal-width reason above. The trailing U+FE0F on the raised hand forces
+    // emoji presentation — its text-presentation fallback is narrower.
+    private static readonly string[] AwaitingFrames = { "👋 ", "✋️ " };
+
+    // Shown in place of the hand when AnimateTitleWhileWaiting is off. Unlike
+    // Busy, AwaitingUser exists to make a backgrounded window visibly blocked
+    // on the user — turning the animation off should stop the motion, not
+    // remove the signal, so this keeps the pre-animation "? " prefix as a
+    // static fallback rather than falling through to no prefix at all.
+    private const string AwaitingStaticPrefix = "? ";
+
+    // Sparkle pulse for a turn that just finished. It and the status bar flash
+    // clear together the moment the window is looked at (see NotifySessionSeen),
+    // the same way the waiting hand clears when the banner it represents gets
+    // resolved.
+    private static readonly string[] CompletedFrames = { "✨ ", "⭐ " };
+
+    // The Completed cue when ShowCompletedIndicator is on but the animation is
+    // off — the same arrangement as AwaitingStaticPrefix, except the switch
+    // that silences it entirely is its own rather than the animation's. Its own
+    // glyph rather than a frozen CompletedFrames entry, for the same reason the
+    // waiting fallback is a "?" and not a frozen hand: standing still, a mark
+    // that means "finished" reads better than one that only meant motion.
+    private const string CompletedStaticPrefix = "✔ ";
+
+    // The timer ticks at spinner speed, so anything slower asks for a larger
+    // TicksPerFrame rather than its own timer. The hand at 4 lands near 0.5s,
+    // which reads as a wave instead of a strobe.
+    private static readonly IReadOnlyDictionary<SessionActivity, TitleAnimation> TitleAnimations =
+        new Dictionary<SessionActivity, TitleAnimation>
+        {
+            [SessionActivity.Busy] = new(SpinnerFrames, TicksPerFrame: 1),
+            [SessionActivity.AwaitingUser] = new(AwaitingFrames, TicksPerFrame: 4),
+            [SessionActivity.Completed] = new(CompletedFrames, TicksPerFrame: 4),
+        };
+
+    private int _tick;
+    private SessionActivity _lastActivity = SessionActivity.Idle;
+
     /// <summary>
     /// Title of a session whose first message is an image with no text, until
     /// a message with text gives the title model something to summarize.
     /// </summary>
     private const string PastedImageTitle = "Pasted image";
 
-    // Realtime activity indicator: a braille spinner prefix while the AI is
-    // working, a steady "? " prefix while awaiting user input (permission /
-    // question banner), and no prefix while idle. Host bindings (e.g. the VS
-    // tool window caption) should use DisplayTitle; SessionTitle stays plain
-    // for the session list entry so the sidebar doesn't flicker.
-    private static readonly string SpinnerFrames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
-    private const string AwaitingPrefix = "? ";
-    private int _spinnerFrame;
     private System.Windows.Threading.DispatcherTimer? _activityTimer;
+
+    // Set when a turn ends unwatched, and cleared the instant the window is
+    // looked at. A separate flag rather than folding into Activity's other
+    // inputs because, unlike Busy/IsAwaitingUser, nothing about the
+    // chat service's state says "seen" — only the UI knows that.
+    private bool _turnUnseen;
+
+    /// <summary>
+    /// Whether the user is looking at this session right now. Maintained by
+    /// the host, which is the only thing that can see focus; a turn that ends
+    /// while this is true never arms the Completed indicator, because there is
+    /// nobody to call back to a window they are already in.
+    /// </summary>
+    public bool IsSessionFocused { get; set; }
 
     [ObservableProperty]
     private string _displayTitle = "New Session";
@@ -99,10 +180,105 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public SessionActivity Activity =>
         IsAwaitingUser ? SessionActivity.AwaitingUser :
         IsBusy ? SessionActivity.Busy :
+        _turnUnseen ? SessionActivity.Completed :
         SessionActivity.Idle;
+
+    /// <summary>
+    /// Called by the host when the user gives the chat window their attention —
+    /// focus landing inside it, or a click anywhere in it. Clears a pending
+    /// Completed indicator: the caption prefix and the flash both key off
+    /// <see cref="Activity"/>, so this is the one place that needs to know
+    /// what "seen" means. Idempotent, since the host raises it far more often
+    /// than there is an indicator to clear.
+    /// </summary>
+    public void NotifySessionSeen()
+    {
+        if (!_turnUnseen) return;
+        _turnUnseen = false;
+        UpdateActivityIndicator();
+    }
+
+    /// <summary>
+    /// The animation for the current state, or null when the state has none or
+    /// the user has switched it off.
+    /// </summary>
+    private TitleAnimation? CurrentAnimation =>
+        TitleAnimations.TryGetValue(Activity, out var animation) && IsAnimationEnabled(Activity)
+            ? animation
+            : null;
+
+    private bool IsAnimationEnabled(SessionActivity activity) => activity switch
+    {
+        SessionActivity.Busy => _options.AnimateTitleWhileBusy,
+        SessionActivity.AwaitingUser => _options.AnimateTitleWhileWaiting,
+        // The marker switch gates both forms, so turning it off stops the timer
+        // rather than leaving it running against a prefix nothing will show.
+        SessionActivity.Completed => _options.ShowCompletedIndicator && _options.AnimateTitleWhenComplete,
+        _ => false
+    };
+
+    /// <summary>
+    /// The prefix for a state whose animation is switched off but which still
+    /// has something to say. Everything the caption can show for a state is
+    /// either here or in <see cref="TitleAnimations"/>.
+    /// </summary>
+    private string StaticPrefix => Activity switch
+    {
+        SessionActivity.AwaitingUser when !_options.AnimateTitleWhileWaiting => AwaitingStaticPrefix,
+        SessionActivity.Completed when _options.ShowCompletedIndicator => CompletedStaticPrefix,
+        _ => ""
+    };
+
+    /// <summary>
+    /// Pushes Tools → Options → Appearance changes into an already-open session.
+    /// <see cref="_options"/> is a private copy captured when the session's tool
+    /// window was created, so without this a toggle only takes effect on the
+    /// next session opened rather than the one currently on screen.
+    /// </summary>
+    public void ApplyAppearanceOptions(
+        bool animateTitleWhileBusy,
+        bool animateTitleWhileWaiting,
+        bool flashStatusBarWhileWaiting,
+        bool showCompletedIndicator,
+        bool animateTitleWhenComplete,
+        bool flashStatusBarWhenComplete)
+    {
+        _options.AnimateTitleWhileBusy = animateTitleWhileBusy;
+        _options.AnimateTitleWhileWaiting = animateTitleWhileWaiting;
+        _options.FlashStatusBarWhileWaiting = flashStatusBarWhileWaiting;
+        _options.ShowCompletedIndicator = showCompletedIndicator;
+        _options.AnimateTitleWhenComplete = animateTitleWhenComplete;
+        _options.FlashStatusBarWhenComplete = flashStatusBarWhenComplete;
+        UpdateActivityIndicator();
+    }
+
+    /// <summary>Text for the indicator strip under the chat input; empty hides it.</summary>
+    // While a turn runs, BusyStatus already covers both Busy and a banner being
+    // up (step or "Waiting for you", plus the elapsed time).
+    public string StatusText => Activity switch
+    {
+        _ when IsBusy => BusyStatus,
+        SessionActivity.AwaitingUser => "Waiting for input…",
+        SessionActivity.Completed => "Done",
+        _ => ""
+    };
+
+    /// <summary>Whether the status bar should be pulsing. Bound by ChatSessionControl.xaml.</summary>
+    public bool IsFlashing =>
+        (Activity == SessionActivity.AwaitingUser && _options.FlashStatusBarWhileWaiting)
+        || (Activity == SessionActivity.Completed && _options.FlashStatusBarWhenComplete);
+
+    partial void OnBusyStatusChanged(string value) => OnPropertyChanged(nameof(StatusText));
 
     partial void OnIsBusyChanged(bool value)
     {
+        // Every turn end counts, not just clean ones and not just turns the
+        // user sent — Stop, an error and a turn the CLI starts on its own all
+        // still leave the window worth glancing back at. Unless the user is
+        // already in it, in which case they have just watched the turn end and
+        // there is nothing left to announce.
+        if (!value) _turnUnseen = !IsSessionFocused;
+
         // Both the elapsed count and the step label belong to one turn.
         _turnStartedUtc = value ? DateTime.UtcNow : null;
         _currentStep = null;
@@ -116,10 +292,25 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     private void UpdateActivityIndicator()
     {
-        // Driven by IsBusy rather than Activity: the clock has to keep running
-        // while a permission or question banner is up, which is exactly when
-        // the user most wants to know how long this has been going on.
-        if (IsBusy)
+        // Activity and everything derived from it are computed, so they have to
+        // be notified by hand for ChatSessionControl.xaml to see the change.
+        OnPropertyChanged(nameof(Activity));
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(IsFlashing));
+
+        // Only on a real transition: this runs on every permission request and
+        // every resolve, and restarting the tick each time would visibly reset
+        // the spinner mid-turn.
+        if (Activity != _lastActivity)
+        {
+            _lastActivity = Activity;
+            _tick = 0;
+        }
+
+        // IsBusy as well as the animation: the elapsed clock has to keep running
+        // while a permission or question banner is up, and when the user has
+        // switched the busy spinner off.
+        if (IsBusy || CurrentAnimation is not null)
         {
             EnsureActivityTimer();
             if (!_activityTimer!.IsEnabled) _activityTimer.Start();
@@ -144,7 +335,20 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         };
         _activityTimer.Tick += (_, _) =>
         {
-            _spinnerFrame = (_spinnerFrame + 1) % SpinnerFrames.Length;
+            var animation = CurrentAnimation;
+            if (animation is not null)
+            {
+                // A held animation wraps so the counter stays bounded; a transient
+                // one must keep counting up or it can never reach its duration.
+                _tick = animation.DurationTicks is null
+                    ? (_tick + 1) % animation.CycleTicks
+                    : _tick + 1;
+            }
+
+            // Kept running while busy so the elapsed clock under the chat ticks on.
+            if (!IsBusy && (animation is null || animation.HasExpired(_tick)))
+                _activityTimer!.Stop();
+
             UpdateDisplayTitle();
             UpdateBusyStatus();
         };
@@ -190,12 +394,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     private void UpdateDisplayTitle()
     {
-        var prefix = Activity switch
-        {
-            SessionActivity.Busy => SpinnerFrames[_spinnerFrame] + " ",
-            SessionActivity.AwaitingUser => AwaitingPrefix,
-            _ => ""
-        };
+        var animation = CurrentAnimation;
+        var prefix = animation is not null && !animation.HasExpired(_tick)
+            ? animation.FrameAt(_tick)
+            : StaticPrefix;
         DisplayTitle = prefix + SessionTitle;
     }
 
@@ -242,6 +444,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     /// </summary>
     public ChatSessionViewModel(string workingDirectory = "")
     {
+        _options = new VsAgenticOptions { WorkingDirectory = workingDirectory };
         WorkingDirectory = workingDirectory;
         _logger = NullLogger.Instance;
     }
@@ -260,7 +463,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         ILogger<ChatSessionViewModel>? logger = null)
     {
         _chatService = chatService;
-        WorkingDirectory = options.Value.WorkingDirectory;
+        _options = options.Value;
+        WorkingDirectory = _options.WorkingDirectory;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
 
         outputListener.StepStarted += OnStepStarted;
@@ -473,6 +677,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             var messages = await store.GetMessagesAsync(folder, sessionId.Value);
             var restoreData = new List<ChatMessageData>();
             var msgIndex = 0;
+
+            // Restored messages get ids of their own, so a subagent's step has
+            // to find its Agent step's new id. The Agent step is saved after
+            // its steps, hence the lookup over all messages first.
+            var restoredIds = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (var i = 0; i < messages.Count; i++)
+            {
+                if (messages[i].StepId is { } stepId)
+                    restoredIds[stepId] = $"restore-{i}";
+            }
+
             foreach (var msg in messages)
             {
                 var type = ParseEnum<ChatItemType>(msg.ItemType);
@@ -527,7 +742,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     ExpanderTitle = msg.ExpanderTitle ?? "",
                     Status = msg.StatusText,
                     IsStreaming = false,
-                    Images = imageDataUris is { Count: > 0 } ? imageDataUris : null
+                    Images = imageDataUris is { Count: > 0 } ? imageDataUris : null,
+                    ParentId = msg.ParentId is { } parent && restoredIds.TryGetValue(parent, out var restoredParent)
+                        ? restoredParent
+                        : null
                 });
             }
             if (restoreData.Count > 0)
@@ -579,12 +797,19 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
         PendingAttachments.Add(attachment);
         SendCommand.NotifyCanExecuteChanged();
+
+        // The file may be the one the editor suggests; it is attached now.
+        RefreshEditorContext();
     }
 
     public void RemoveAttachment(IChatAttachment attachment)
     {
         PendingAttachments.Remove(attachment);
         SendCommand.NotifyCanExecuteChanged();
+
+        // A removed editor context goes back to being a suggestion.
+        if (attachment is EditorContext)
+            RefreshEditorContext();
     }
 
     /// <summary>
@@ -615,10 +840,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         var images = PendingAttachments.OfType<ChatImageAttachment>().ToList();
         // In the order they were pasted, so the names line up with the
         // thumbnails the message carries.
-        var named = PendingAttachments.Where(a => a.SourcePath is not null).ToList();
+        var named = PendingAttachments.Where(a => a.SourcePath is not null && a is not EditorContext).ToList();
+        var editorContexts = PendingAttachments.OfType<EditorContext>().ToList();
         var sentImages = images.Count > 0 ? images : null;
         PendingAttachments.Clear();
         SendCommand.NotifyCanExecuteChanged();
+        RefreshEditorContext();
 
         // Attached files are named in the prompt rather than uploaded: the CLI
         // reads them off disk with the same tools it uses for the rest of the
@@ -626,6 +853,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // the transcript of what went out.
         if (named.Count > 0)
             message = WithFileReferences(message, named);
+
+        // Editor contexts go first, then the same way as files, except that the
+        // CLI also gets the selected text.
+        WithEditorContexts(editorContexts, ref message, out var sentMessage);
 
         // Written next to the session so reopening it shows the images again.
         var storedImageNames = sentImages is null
@@ -684,7 +915,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // session after the empty message ("Empty message, no request given"), so
         // such a session gets a placeholder until text arrives.
         var userMessages = Items.Where(i => i.Type == ChatItemType.User).ToList();
-        var hasText = !string.IsNullOrWhiteSpace(message);
+        var titleSource = WithoutEditorContextLines(message);
+        var hasText = !string.IsNullOrWhiteSpace(titleSource);
         var isFirstMessage = userMessages.Count == 1;
         var isFirstText = hasText && userMessages.Count(i => !string.IsNullOrWhiteSpace(i.Content)) == 1;
 
@@ -699,7 +931,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 try
                 {
-                    var title = await _chatService.GenerateTitleAsync(message);
+                    var title = await _chatService.GenerateTitleAsync(titleSource);
                     Dispatch(() =>
                     {
                         // The user may have renamed the session while the
@@ -719,7 +951,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         var token = _sendCts.Token;
         try
         {
-            await foreach (var _ in _chatService.SendMessageAsync(message, sentImages, token))
+            await foreach (var _ in _chatService.SendMessageAsync(sentMessage, sentImages, token))
             {
                 // Output is handled by listener callbacks
             }
@@ -848,7 +1080,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 // read, the command being run. The folded row takes its first
                 // line, which is what turns "Using Read" into something worth
                 // reading while the task is still going.
-                Body = type == ChatItemType.ToolStep ? item.Body : null
+                Body = type == ChatItemType.ToolStep ? item.Body : null,
+                ParentId = item.ParentId
             });
 
             _currentStep = expanderTitle;
@@ -934,6 +1167,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     BodyMode = vm.BodyMode.ToString(),
                     ExpanderTitle = vm.ExpanderTitle,
                     StatusText = vm.Status.ToString(),
+                    StepId = item.Id,
+                    ParentId = item.ParentId,
                     CreatedUtc = DateTime.UtcNow
                 });
             }
@@ -1064,6 +1299,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         try { _activityTimer?.Stop(); } catch { }
+        try { EditorContextProvider = null; } catch { }
         try
         {
             if (_chatService is not null)
@@ -1087,5 +1323,6 @@ public enum SessionActivity
 {
     Idle,
     Busy,
-    AwaitingUser
+    AwaitingUser,
+    Completed
 }

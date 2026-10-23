@@ -10,7 +10,8 @@
              xmlns:bv="clr-namespace:VsAgentic.VSExtension.ToolWindows.Banners"
              xmlns:local="clr-namespace:VsAgentic.VSExtension.ToolWindows"
              PreviewMouseWheel="OnPreviewMouseWheel"
-             PreviewKeyDown="OnPreviewKeyDown" >
+             PreviewKeyDown="OnPreviewKeyDown"
+             PreviewMouseDown="OnPreviewMouseDown" >
 
     <UserControl.Resources>
         <ResourceDictionary>
@@ -21,6 +22,17 @@
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <controls:AttachmentPreviewConverter x:Key="AttachmentPreviewConverter"/>
         <controls:MinWidthVisibilityConverter x:Key="MinWidth"/>
+
+        <!-- Flashes the status bar background while waiting for input. To-only
+             animation with AutoReverse, so the themed base colour never has to
+             be restated here: it animates from whatever the brush currently is
+             and back. Keyframes can't carry a DynamicResource anyway (a
+             Storyboard is a Freezable), and VsBrushes keys resolve to a Brush,
+             not the Color a colour keyframe needs. -->
+        <Storyboard x:Key="FlashStoryboard" RepeatBehavior="Forever" AutoReverse="True">
+            <ColorAnimation Storyboard.TargetProperty="Background.Color"
+                            To="#66808080" Duration="0:0:0.75"/>
+        </Storyboard>
 
         <!-- Status bar pickers. Fully retemplated rather than merely unbordered:
              the stock ComboBox chrome draws its own border, background and
@@ -251,6 +263,77 @@
             </Border>
         </DataTemplate>
 
+        <!-- The file open in the editor, or the lines selected in it, once the
+             user has attached it: a chip like a pasted file. The tooltip is the
+             path with the lines, which is what the message names. -->
+        <DataTemplate DataType="{x:Type svc:EditorContext}">
+            <Border Margin="0,0,6,6"
+                    BorderThickness="1"
+                    CornerRadius="3"
+                    Padding="6,3"
+                    VerticalAlignment="Top"
+                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                    ToolTip="{Binding Reference}">
+                <StackPanel Orientation="Horizontal">
+                    <imaging:CrispImage Width="14" Height="14"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0"
+                                        Moniker="{x:Static catalog:KnownMonikers.TextFile}"/>
+                    <TextBlock Text="{Binding DisplayName}"
+                               VerticalAlignment="Center"
+                               MaxWidth="260"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+                    <Button Content="&#xE10A;"
+                            FontFamily="Segoe MDL2 Assets"
+                            FontSize="9"
+                            Width="16" Height="16"
+                            Padding="0"
+                            Margin="6,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="Remove"
+                            Click="RemoveAttachment_Click"/>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- The same, only offered, as a button beside @ and the paperclip:
+             grey text in the status bar, so it reads as an action like theirs.
+             Nothing goes out until the user clicks it. -->
+        <DataTemplate x:Key="EditorContextSuggestionTemplate" DataType="{x:Type svc:EditorContext}">
+            <!-- Dynamic: the style is defined further down the resources. -->
+            <Button Style="{DynamicResource IconButtonStyle}"
+                    Click="AcceptEditorContext_Click">
+                <Button.ToolTip>
+                    <TextBlock>
+                        <Run Text="Attach to the next message:"/>
+                        <LineBreak/>
+                        <Run Text="{Binding Reference, Mode=OneWay}"/>
+                    </TextBlock>
+                </Button.ToolTip>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE710;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="9"
+                               VerticalAlignment="Center"
+                               Margin="0,0,4,0"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                    <!-- Only the name is shortened: the lines are what tells
+                         one suggestion from the next. -->
+                    <TextBlock Text="{Binding FileName}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               MaxWidth="180"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                    <TextBlock Text="{Binding LineRange}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                </StackPanel>
+            </Button>
+        </DataTemplate>
+
         <!-- Banner DataTemplates: ContentControl below picks the right view by VM type. -->
         <DataTemplate DataType="{x:Type bvm:PermissionBannerViewModel}">
             <bv:PermissionBannerControl/>
@@ -391,7 +474,8 @@
                         AllowDrop="True"
                         PreviewDragOver="PromptBox_PreviewDragOver"
                         PreviewDragLeave="PromptBox_PreviewDragLeave"
-                        PreviewDrop="PromptBox_PreviewDrop">
+                        PreviewDrop="PromptBox_PreviewDrop"
+                        MouseEnter="PromptBox_MouseEnter">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -441,6 +525,7 @@
                                      PreviewKeyDown="InputTextBox_PreviewKeyDown"
                                      TextChanged="InputTextBox_TextChanged"
                                      SelectionChanged="InputTextBox_SelectionChanged"
+                                     GotKeyboardFocus="InputTextBox_GotKeyboardFocus"
                                      LostKeyboardFocus="InputTextBox_LostKeyboardFocus"/>
 
                             <!-- @-mention popup: anchored above the input box, holds a filtered file/folder list -->
@@ -513,6 +598,29 @@
                         <Border Grid.Row="2"
                                 BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
                                 BorderThickness="0,1,0,0">
+                            <!-- A local brush, not the shared VsBrushes one: the themed
+                                 brushes are frozen and can't be animated. -->
+                            <Border.Background>
+                                <SolidColorBrush Color="{DynamicResource {x:Static vs:VsColors.ComboBoxBackgroundKey}}"/>
+                            </Border.Background>
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Style.Triggers>
+                                        <!-- IsFlashing, not Activity: the view model already
+                                             folds the state and the user's Appearance switch
+                                             into one answer, so the switch logic stays in
+                                             one place as more states are added. -->
+                                        <DataTrigger Binding="{Binding IsFlashing}" Value="True">
+                                            <DataTrigger.EnterActions>
+                                                <BeginStoryboard x:Name="FlashBegin" Storyboard="{StaticResource FlashStoryboard}"/>
+                                            </DataTrigger.EnterActions>
+                                            <DataTrigger.ExitActions>
+                                                <StopStoryboard BeginStoryboardName="FlashBegin"/>
+                                            </DataTrigger.ExitActions>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -545,6 +653,15 @@
                                         <imaging:CrispImage Width="16" Height="16"
                                                             Moniker="{x:Static catalog:KnownMonikers.AddAttachment}"/>
                                     </Button>
+
+                                    <!-- The third way: the file open in the editor,
+                                         or its selection, one click away. An action
+                                         next to the other two, not a chip above the
+                                         input, so it does not read as attached. -->
+                                    <ItemsControl ItemsSource="{Binding EditorContextSuggestions}"
+                                                  ItemTemplate="{StaticResource EditorContextSuggestionTemplate}"
+                                                  VerticalAlignment="Center"
+                                                  Focusable="False"/>
                                 </StackPanel>
 
                                 <!-- Status info: usage readings and the model /
@@ -727,13 +844,24 @@
             </Grid>
         </Border>
 
-        <!-- Busy indicator -->
+        <!-- Status indicator. The wording per state and the empty-means-hidden
+             rule both live on the view model's StatusText, so a new state does
+             not add a trigger here. -->
         <Border DockPanel.Dock="Bottom"
                 LayoutTransform="{StaticResource ChromeZoom}"
                 Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
-                Padding="16,4"
-                Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
-            <TextBlock Text="{Binding BusyStatus}"
+                Padding="16,4">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Visible"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding StatusText}" Value="">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <TextBlock Text="{Binding StatusText}"
                        TextTrimming="CharacterEllipsis"
                        Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"
                        FontSize="12" FontStyle="Italic"/>

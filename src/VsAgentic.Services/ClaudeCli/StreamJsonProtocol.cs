@@ -23,12 +23,19 @@ internal static class StreamJsonProtocol
 
     /// <summary>
     /// Build the JSON line for a plain-text user message sent to the CLI over stdin.
+    ///
+    /// <paramref name="uuid"/> names the message. The CLI repeats it in the
+    /// <c>command_lifecycle</c> events for the message and in the
+    /// <c>user_message_uuids</c> of the turn's result, which is how a result is
+    /// matched to the message that started the turn. A CLI that predates the
+    /// field ignores it.
     /// </summary>
-    public static string BuildUserTextMessage(string text)
+    public static string BuildUserTextMessage(string text, string uuid)
     {
         var msg = new
         {
             type = "user",
+            uuid,
             message = new
             {
                 role = "user",
@@ -45,10 +52,12 @@ internal static class StreamJsonProtocol
     ///
     /// Images come before the text: the API reads a prompt that refers to
     /// "this screenshot" more reliably when the image is already in context.
+    /// <paramref name="uuid"/> is as in <see cref="BuildUserTextMessage"/>.
     /// </summary>
     public static string BuildUserMessageWithImages(
         string text,
-        IReadOnlyList<ChatImageAttachment> images)
+        IReadOnlyList<ChatImageAttachment> images,
+        string uuid)
     {
         var content = new List<object>(images.Count + 1);
 
@@ -75,6 +84,7 @@ internal static class StreamJsonProtocol
         var msg = new
         {
             type = "user",
+            uuid,
             message = new
             {
                 role = "user",
@@ -142,9 +152,23 @@ internal static class StreamJsonProtocol
     /// Build the <c>initialize</c> request. It registers nothing: no hooks, no
     /// SDK MCP servers, no prompt changes. The point is the answer, which
     /// describes the process (see <see cref="CliProcessInfo"/>).
+    ///
+    /// <c>forwardSubagentText</c> asks for the text and thinking of subagents
+    /// as well; without it the CLI sends only their tool calls, and nothing
+    /// at all from a subagent that a subagent started. A CLI that predates the
+    /// field ignores it, which a command-line flag it does not know would not.
     /// </summary>
     public static string BuildInitialize(string requestId) =>
-        BuildControlRequest(requestId, "initialize");
+        BuildControlRequest(requestId, "initialize", w => w.WriteBoolean("forwardSubagentText", true));
+
+    /// <summary>
+    /// Build the <c>interrupt</c> request, which aborts the running turn.
+    /// <c>cancel_queued</c> also drops the messages still waiting in the CLI's
+    /// queue, so Stop leaves nothing behind that would start on its own. A CLI
+    /// that predates the field ignores it.
+    /// </summary>
+    public static string BuildInterrupt(string requestId) =>
+        BuildControlRequest(requestId, "interrupt", w => w.WriteBoolean("cancel_queued", true));
 
     /// <summary>
     /// Build the <c>set_model</c> request. A null model returns the session to
