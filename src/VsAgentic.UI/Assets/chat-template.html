@@ -285,6 +285,35 @@ html, body {
 .toolstep-status { font-size: 10px; }
 .toolstep-name { color: var(--text-muted); }
 
+/* A line the CLI reports about the session: a retry, a hook's message. */
+.msg-session-line {
+    margin: 2px 12px;
+    padding: 2px 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.session-line-header {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+.session-line-header .msg-status { font-size: 10px; flex: none; }
+.msg-session-line .msg-body {
+    margin: 2px 0 0 16px;
+    font-size: 11px;
+}
+/* A compaction divides the conversation, so it is drawn as a divider. */
+.msg-session-line.session-line-divider .session-line-header {
+    justify-content: center;
+}
+.msg-session-line.session-line-divider .session-line-header::before,
+.msg-session-line.session-line-divider .session-line-header::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
+    align-self: center;
+}
+
 .toolstep-expander {
     margin: 4px 0 0 18px;
     font-size: 11px;
@@ -779,6 +808,16 @@ function isTurnFailure(type, data) {
     return type === 'ToolStep' && data.Status === 'Error' && data.ToolName === 'ClaudeCli';
 }
 
+// What the CLI reports about the session rather than a step toward the answer:
+// an API retry, a compaction, a hook's message. The service reports these as
+// steps with a tool name of their own (SessionLineSteps). Each is a line in the
+// transcript, where it is read in order, not one more step in the folded row.
+var SESSION_LINE_TOOLS = ['Retry', 'Compact', 'CliMessage'];
+
+function isSessionLine(type, data) {
+    return type === 'ToolStep' && SESSION_LINE_TOOLS.indexOf(data.ToolName) >= 0;
+}
+
 function setActivityLabel(group, text) {
     var label = group.querySelector('.activity-label');
     if (label) label.textContent = text || '';
@@ -1098,6 +1137,29 @@ function addMessage(id, type, dataJson) {
         inner.appendChild(content);
         div.appendChild(inner);
     }
+    else if (isSessionLine(type, data)) {
+        div.classList.add('msg-session-line');
+        if (data.ToolName === 'Compact') div.classList.add('session-line-divider');
+        var header = document.createElement('div');
+        header.className = 'session-line-header';
+        var statusSpan = document.createElement('span');
+        statusSpan.className = 'msg-status';
+        statusSpan.style.color = STATUS_COLORS[data.Status] || STATUS_COLORS.Pending;
+        statusSpan.textContent = STATUS_SYMBOLS[data.Status] || STATUS_SYMBOLS.Pending;
+        // The title is the message. Text, not markup: it is the CLI's or a
+        // hook's own words.
+        var title = document.createElement('span');
+        title.className = 'msg-expander-title';
+        title.textContent = data.ExpanderTitle || data.Title || '';
+        header.appendChild(statusSpan);
+        header.appendChild(title);
+        div.appendChild(header);
+
+        var body = document.createElement('div');
+        body.className = 'md-content msg-body';
+        body.style.display = 'none';
+        div.appendChild(body);
+    }
     else if (type === 'ToolStep') {
         div.classList.add('msg-toolstep');
         // Header row
@@ -1235,6 +1297,14 @@ function placeMessage(div, type, data) {
         _userScrolledUp = false;
         scrollToBottom();
         updateScrollButton();
+    } else if (isSessionLine(type, data)) {
+        // Steps after the notice open a row of their own below it, so the
+        // transcript keeps the order things happened in. Text standing before
+        // it stays where it is: it may be the reply, which a Stop hook's
+        // message follows.
+        closeActivityGroup();
+        _container.appendChild(div);
+        maybeScrollToBottom();
     } else if (isTurnFailure(type, data)) {
         // Left standing, and the text before it left alone: when a turn ends in
         // an error, that text is usually as far as the answer got, and folding

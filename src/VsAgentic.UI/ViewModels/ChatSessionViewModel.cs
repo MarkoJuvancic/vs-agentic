@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -1093,6 +1093,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     private void OnStepUpdated(OutputItem item)
     {
+        if (SessionLineSteps.Contains(item.ToolName))
+        {
+            Dispatch(() => RetitleNotice(item));
+            return;
+        }
+
         if (string.IsNullOrEmpty(item.Delta))
             return;
 
@@ -1119,12 +1125,34 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         });
     }
 
+    /// <summary>
+    /// A notice line says what it is in its title, and the title moves on
+    /// while the line is open: the retry count, a compaction that finished.
+    /// The bar under the chat follows it.
+    /// </summary>
+    private void RetitleNotice(OutputItem item)
+    {
+        if (!_activeItems.TryGetValue(item.Id, out var vm)) return;
+
+        vm.ExpanderTitle = item.Title;
+        MessageStatusUpdated?.Invoke(item.Id, vm.Status, item.Title);
+
+        if (_currentStepId == item.Id)
+        {
+            _currentStep = item.Title;
+            UpdateBusyStatus();
+        }
+    }
+
     private void OnStepCompleted(OutputItem item)
     {
         Dispatch(() =>
         {
             if (_activeItems.TryGetValue(item.Id, out var vm))
             {
+                if (SessionLineSteps.Contains(item.ToolName))
+                    RetitleNotice(item);
+
                 vm.Status = item.Status;
                 vm.IsStreaming = false;
 
