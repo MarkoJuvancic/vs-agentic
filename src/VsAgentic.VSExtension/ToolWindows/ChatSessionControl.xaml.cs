@@ -249,6 +249,45 @@ public partial class ChatSessionControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Attaches a selection sent from the editor's context menu. The input box
+    /// takes focus once the window has come forward, so the user can type the
+    /// question straight away.
+    /// </summary>
+    public void AttachFromEditor(EditorContext context)
+    {
+        if (DataContext is not ChatSessionViewModel vm) return;
+
+        vm.Attach(context);
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => InputTextBox.Focus()));
+    }
+
+    private void AcceptEditorContext_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is ChatSessionViewModel vm &&
+            sender is FrameworkElement { DataContext: EditorContext suggestion })
+        {
+            vm.AcceptEditorContext(suggestion);
+
+            // The next thing the user does is type the question about it.
+            InputTextBox.Focus();
+        }
+    }
+
+    // The selection only changes while the user is in the editor, so coming
+    // back to the input box is when the suggestion has to catch up. The mouse
+    // gets there first when the user goes straight for the suggestion, and
+    // the button must name what a click attaches.
+    private void InputTextBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        (DataContext as ChatSessionViewModel)?.RefreshEditorContext();
+    }
+
+    private void PromptBox_MouseEnter(object sender, MouseEventArgs e)
+    {
+        (DataContext as ChatSessionViewModel)?.RefreshEditorContext();
+    }
+
     // ------------------------------------------------------------------
     // Zoom
     // ------------------------------------------------------------------

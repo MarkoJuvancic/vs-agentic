@@ -579,12 +579,19 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
         PendingAttachments.Add(attachment);
         SendCommand.NotifyCanExecuteChanged();
+
+        // The file may be the one the editor suggests; it is attached now.
+        RefreshEditorContext();
     }
 
     public void RemoveAttachment(IChatAttachment attachment)
     {
         PendingAttachments.Remove(attachment);
         SendCommand.NotifyCanExecuteChanged();
+
+        // A removed editor context goes back to being a suggestion.
+        if (attachment is EditorContext)
+            RefreshEditorContext();
     }
 
     /// <summary>
@@ -615,10 +622,12 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         var images = PendingAttachments.OfType<ChatImageAttachment>().ToList();
         // In the order they were pasted, so the names line up with the
         // thumbnails the message carries.
-        var named = PendingAttachments.Where(a => a.SourcePath is not null).ToList();
+        var named = PendingAttachments.Where(a => a.SourcePath is not null && a is not EditorContext).ToList();
+        var editorContexts = PendingAttachments.OfType<EditorContext>().ToList();
         var sentImages = images.Count > 0 ? images : null;
         PendingAttachments.Clear();
         SendCommand.NotifyCanExecuteChanged();
+        RefreshEditorContext();
 
         // Attached files are named in the prompt rather than uploaded: the CLI
         // reads them off disk with the same tools it uses for the rest of the
@@ -626,6 +635,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // the transcript of what went out.
         if (named.Count > 0)
             message = WithFileReferences(message, named);
+
+        // Editor contexts go first, then the same way as files, except that the
+        // CLI also gets the selected text.
+        WithEditorContexts(editorContexts, ref message, out var sentMessage);
 
         // Written next to the session so reopening it shows the images again.
         var storedImageNames = sentImages is null
@@ -684,7 +697,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         // session after the empty message ("Empty message, no request given"), so
         // such a session gets a placeholder until text arrives.
         var userMessages = Items.Where(i => i.Type == ChatItemType.User).ToList();
-        var hasText = !string.IsNullOrWhiteSpace(message);
+        var titleSource = WithoutEditorContextLines(message);
+        var hasText = !string.IsNullOrWhiteSpace(titleSource);
         var isFirstMessage = userMessages.Count == 1;
         var isFirstText = hasText && userMessages.Count(i => !string.IsNullOrWhiteSpace(i.Content)) == 1;
 
@@ -699,7 +713,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 try
                 {
-                    var title = await _chatService.GenerateTitleAsync(message);
+                    var title = await _chatService.GenerateTitleAsync(titleSource);
                     Dispatch(() =>
                     {
                         // The user may have renamed the session while the
@@ -719,7 +733,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         var token = _sendCts.Token;
         try
         {
-            await foreach (var _ in _chatService.SendMessageAsync(message, sentImages, token))
+            await foreach (var _ in _chatService.SendMessageAsync(sentMessage, sentImages, token))
             {
                 // Output is handled by listener callbacks
             }
@@ -1064,6 +1078,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         try { _activityTimer?.Stop(); } catch { }
+        try { EditorContextProvider = null; } catch { }
         try
         {
             if (_chatService is not null)

@@ -211,6 +211,77 @@
             </Border>
         </DataTemplate>
 
+        <!-- The file open in the editor, or the lines selected in it, once the
+             user has attached it: a chip like a pasted file. The tooltip is the
+             path with the lines, which is what the message names. -->
+        <DataTemplate DataType="{x:Type svc:EditorContext}">
+            <Border Margin="0,0,6,6"
+                    BorderThickness="1"
+                    CornerRadius="3"
+                    Padding="6,3"
+                    VerticalAlignment="Top"
+                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                    ToolTip="{Binding Reference}">
+                <StackPanel Orientation="Horizontal">
+                    <imaging:CrispImage Width="14" Height="14"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0"
+                                        Moniker="{x:Static catalog:KnownMonikers.TextFile}"/>
+                    <TextBlock Text="{Binding DisplayName}"
+                               VerticalAlignment="Center"
+                               MaxWidth="260"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+                    <Button Content="&#xE10A;"
+                            FontFamily="Segoe MDL2 Assets"
+                            FontSize="9"
+                            Width="16" Height="16"
+                            Padding="0"
+                            Margin="6,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="Remove"
+                            Click="RemoveAttachment_Click"/>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- The same, only offered, as a button beside @ and the paperclip:
+             grey text in the status bar, so it reads as an action like theirs.
+             Nothing goes out until the user clicks it. -->
+        <DataTemplate x:Key="EditorContextSuggestionTemplate" DataType="{x:Type svc:EditorContext}">
+            <!-- Dynamic: the style is defined further down the resources. -->
+            <Button Style="{DynamicResource IconButtonStyle}"
+                    Click="AcceptEditorContext_Click">
+                <Button.ToolTip>
+                    <TextBlock>
+                        <Run Text="Attach to the next message:"/>
+                        <LineBreak/>
+                        <Run Text="{Binding Reference, Mode=OneWay}"/>
+                    </TextBlock>
+                </Button.ToolTip>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE710;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="9"
+                               VerticalAlignment="Center"
+                               Margin="0,0,4,0"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                    <!-- Only the name is shortened: the lines are what tells
+                         one suggestion from the next. -->
+                    <TextBlock Text="{Binding FileName}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               MaxWidth="180"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                    <TextBlock Text="{Binding LineRange}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                </StackPanel>
+            </Button>
+        </DataTemplate>
+
         <!-- Banner DataTemplates: ContentControl below picks the right view by VM type. -->
         <DataTemplate DataType="{x:Type bvm:PermissionBannerViewModel}">
             <bv:PermissionBannerControl/>
@@ -351,7 +422,8 @@
                         AllowDrop="True"
                         PreviewDragOver="PromptBox_PreviewDragOver"
                         PreviewDragLeave="PromptBox_PreviewDragLeave"
-                        PreviewDrop="PromptBox_PreviewDrop">
+                        PreviewDrop="PromptBox_PreviewDrop"
+                        MouseEnter="PromptBox_MouseEnter">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -401,6 +473,7 @@
                                      PreviewKeyDown="InputTextBox_PreviewKeyDown"
                                      TextChanged="InputTextBox_TextChanged"
                                      SelectionChanged="InputTextBox_SelectionChanged"
+                                     GotKeyboardFocus="InputTextBox_GotKeyboardFocus"
                                      LostKeyboardFocus="InputTextBox_LostKeyboardFocus"/>
 
                             <!-- @-mention popup: anchored above the input box, holds a filtered file/folder list -->
@@ -505,6 +578,15 @@
                                         <imaging:CrispImage Width="16" Height="16"
                                                             Moniker="{x:Static catalog:KnownMonikers.AddAttachment}"/>
                                     </Button>
+
+                                    <!-- The third way: the file open in the editor,
+                                         or its selection, one click away. An action
+                                         next to the other two, not a chip above the
+                                         input, so it does not read as attached. -->
+                                    <ItemsControl ItemsSource="{Binding EditorContextSuggestions}"
+                                                  ItemTemplate="{StaticResource EditorContextSuggestionTemplate}"
+                                                  VerticalAlignment="Center"
+                                                  Focusable="False"/>
                                 </StackPanel>
 
                                 <!-- Status info: usage readings and the model /
