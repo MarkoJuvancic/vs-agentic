@@ -54,6 +54,22 @@ public partial class ChatWebView : UserControl
     /// </summary>
     public event Action<string>? MoveToBackgroundRequested;
 
+    /// <summary>
+    /// Raised when the user presses a pointer button anywhere in the rendered
+    /// chat. The transcript is a browser child window, so a click in it is not
+    /// a WPF mouse event and need not move WPF focus either — without this
+    /// relay, reading the chat and clicking about in it would leave the host
+    /// believing the session had never been looked at.
+    /// </summary>
+    public event Action? Clicked;
+
+    /// <summary>
+    /// Raised when the rendered chat gains or loses focus. WPF cannot answer
+    /// that for a browser child window, and the host needs it to tell a
+    /// session the user is sitting in from one they have walked away from.
+    /// </summary>
+    public event Action<bool>? ContentFocusChanged;
+
     private bool _isWebViewReady;
     private double _zoomFactor = ZoomLevels.Default;
     private readonly ConcurrentQueue<Func<Task>> _pendingOps = new();
@@ -397,6 +413,7 @@ public partial class ChatWebView : UserControl
             BodyMode = data.BodyMode,
             Body = data.Body,
             IsStreaming = data.IsStreaming,
+            ParentId = data.ParentId,
             Images = urls
         };
     }
@@ -526,6 +543,14 @@ public partial class ChatWebView : UserControl
                 if (!string.IsNullOrEmpty(id))
                     MoveToBackgroundRequested?.Invoke(id!);
             }
+            else if (type == "click")
+            {
+                Clicked?.Invoke();
+            }
+            else if (type == "focus")
+            {
+                ContentFocusChanged?.Invoke(root.GetProperty("hasFocus").GetBoolean());
+            }
         }
         catch
         {
@@ -608,6 +633,27 @@ public partial class ChatWebView : UserControl
         var snapshot = messages.ToList();
         return ExecuteOrQueueAsync(() =>
             $"loadMessages({JsonSerializer.Serialize(snapshot.Select(MaterializeImages))})");
+    }
+
+    /// <summary>
+    /// Opens the find bar over the chat and gives it the keyboard focus. The
+    /// page opens it on its own when Ctrl+F is pressed inside it; this is for
+    /// the key pressed anywhere else in the window.
+    /// </summary>
+    public Task OpenFindAsync()
+    {
+        WebView.Focus();
+        return ExecuteOrQueueAsync("openFind()");
+    }
+
+    /// <summary>
+    /// Moves to the next match (+1) or the previous one (-1), or opens the find
+    /// bar when it is closed. For F3 and Shift+F3 pressed outside the page.
+    /// </summary>
+    public Task FindNextAsync(int direction)
+    {
+        WebView.Focus();
+        return ExecuteOrQueueAsync($"findNext({(direction < 0 ? -1 : 1)})");
     }
 
     public Task SetThemeColorsAsync(Dictionary<string, string> colors)
