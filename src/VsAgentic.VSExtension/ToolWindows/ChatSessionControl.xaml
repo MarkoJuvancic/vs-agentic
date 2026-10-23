@@ -725,7 +725,7 @@
                                             </ListBox.GroupStyle>
                                             <ListBox.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Grid ToolTip="{Binding Description}">
+                                                    <Grid ToolTip="{StaticResource RowDescriptionTip}">
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
                                                             <ColumnDefinition Width="Auto"/>
