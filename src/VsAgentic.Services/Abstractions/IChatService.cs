@@ -10,6 +10,11 @@ public interface IChatService
     /// which keeps the wire format identical to what it was before images
     /// existed.
     /// </param>
+    /// <param name="cancellationToken">
+    /// Stops the turn. The CLI is told to abort it too, and the call throws
+    /// <see cref="OperationCanceledException"/> once the CLI has closed the
+    /// turn, or after a short wait if it does not.
+    /// </param>
     IAsyncEnumerable<string> SendMessageAsync(
         string userMessage,
         IReadOnlyList<ChatImageAttachment>? images = null,
@@ -78,6 +83,44 @@ public interface IChatService
     /// conversation. A no-op when neither value changed.
     /// </summary>
     void ApplyModelAndEffort(string modelAlias, ClaudeEffort effort);
+
+    /// <summary>
+    /// The effort level the CLI will send on its next request, as it reports
+    /// it — what <see cref="ClaudeEffort.Default"/> resolves to, or the chosen
+    /// level after the CLI lowered it for a model that does not support it.
+    /// Null when not known yet, and when the model has no effort setting.
+    /// </summary>
+    ClaudeEffort? AppliedEffort { get; }
+
+    /// <summary>
+    /// Raised when <see cref="AppliedEffort"/> changes. Raised on a background
+    /// thread; hosts must marshal to the UI thread.
+    /// </summary>
+    event Action<ClaudeEffort?>? AppliedEffortChanged;
+
+    /// <summary>
+    /// Asks for fast mode for the rest of this session, or stops asking. A
+    /// running process takes it from its next request; a process started later
+    /// gets it before the first message. Not stored anywhere: a new session
+    /// starts without it.
+    /// </summary>
+    void SetFastMode(bool on);
+
+    /// <summary>Whether the user asked for fast mode in this session.</summary>
+    bool FastModeRequested { get; }
+
+    /// <summary>
+    /// Fast mode as the CLI last reported it. Whether a request runs fast
+    /// depends on this, not on <see cref="FastModeRequested"/>: the model, the
+    /// plan or the account can keep it off.
+    /// </summary>
+    FastModeStatus FastMode { get; }
+
+    /// <summary>
+    /// Raised when <see cref="FastMode"/> changes. Raised on a background
+    /// thread; hosts must marshal to the UI thread.
+    /// </summary>
+    event Action<FastModeStatus>? FastModeChanged;
 
     /// <summary>
     /// Raised when the underlying CLI returned an authentication / login-required
