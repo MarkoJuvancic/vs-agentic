@@ -13,6 +13,21 @@ namespace VsAgentic.VSExtension.Options;
 [Guid("a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d")]
 public class VsAgenticOptionsPage : DialogPage
 {
+    /// <summary>
+    /// Raised after the user clicks OK/Apply. Already-open chat sessions hold
+    /// their own copy of the options captured when their tool window was
+    /// created, so the package needs this to push changes (e.g. the Appearance
+    /// toggles) into them live instead of waiting for the next session.
+    /// </summary>
+    public event EventHandler? Applied;
+
+    protected override void OnApply(PageApplyEventArgs e)
+    {
+        base.OnApply(e);
+        if (e.ApplyBehavior == ApplyKind.Apply)
+            Applied?.Invoke(this, EventArgs.Empty);
+    }
+
     [Category("Claude CLI")]
     [DisplayName("Claude CLI Path")]
     [Description("Path to the Claude Code CLI executable. Defaults to 'claude' (assumes it's on PATH).")]
@@ -67,9 +82,54 @@ public class VsAgenticOptionsPage : DialogPage
     [DefaultValue(100)]
     public int ZoomPercent { get; set; } = 100;
 
+    [Category("Appearance")]
+    [DisplayName("Working - animate tab title")]
+    [Description("Show a spinner on chat window's tab title while a turn is running. Turn off if you prefer a static title.")]
+    [DefaultValue(true)]
+    public bool AnimateTitleWhileBusy { get; set; } = true;
+
+    [Category("Appearance")]
+    [DisplayName("Waiting for input - animate tab title")]
+    [Description("Make the waiting for input more visible by showing a waving hand on chat window's tab title. Applies to input from you, such as permission or question banner. Also shows when window is backgrounded.")]
+    [DefaultValue(true)]
+    public bool AnimateTitleWhileWaiting { get; set; } = true;
+
+    [Category("Appearance")]
+    [DisplayName("Waiting for input - flash status bar")]
+    [Description("Pulse the background of the bar under the chat input while a permission or question banner needs an answer.")]
+    [DefaultValue(true)]
+    public bool FlashStatusBarWhileWaiting { get; set; } = true;
+
+    // Property name kept from when this switched a tab icon rather than a title
+    // marker: DialogPage persists by property name, so renaming it would quietly
+    // reset anyone who had turned it off.
+    [Category("Appearance")]
+    [DisplayName("Completed - show title marker")]
+    [Description("Show a sparkle on the chat window's tab title once a turn finishes, until you switch to that tab. Also shows when the window is backgrounded. Turn off to leave the title alone when a turn ends.")]
+    [DefaultValue(true)]
+    public bool ShowCompletedIndicator { get; set; } = true;
+
+    [Category("Appearance")]
+    [DisplayName("Completed - animate tab title")]
+    [Description("Pulse the completed marker rather than showing it still. Has no effect unless 'Completed - show title marker' is on.")]
+    [DefaultValue(true)]
+    public bool AnimateTitleWhenComplete { get; set; } = true;
+
+    [Category("Appearance")]
+    [DisplayName("Completed - flash status bar")]
+    [Description("Pulse the background of the bar under the chat input once a turn finishes, until you switch to that tab.")]
+    [DefaultValue(true)]
+    public bool FlashStatusBarWhenComplete { get; set; } = true;
+
+    [Category("Editor context")]
+    [DisplayName("Suggest the active file and selection")]
+    [Description("Offer the file open in the editor, and the lines selected in it, as a faded chip above the chat input. Nothing is sent until you click the chip; it then goes out with the next message like an attached file. Selected text is sent as well, so unsaved changes reach Claude too.")]
+    [DefaultValue(true)]
+    public bool SuggestEditorContext { get; set; } = true;
+
     [Category("Sessions")]
     [DisplayName("Keep days of activity")]
-    [Description("When the extension starts, sessions whose last activity is older than this many days are deleted. Default: 30. Set to 0 to disable cleanup.")]
+    [Description("When the extension starts, a session whose last activity is older than this many days is archived, and a session that has been in the archive for this long is deleted. A session is therefore kept for twice this many days before anything is lost. Restoring a session counts as activity. The Claude CLI removes its own copy of a conversation after its cleanupPeriodDays setting (default 30). When it no longer has a session's conversation, the next message in that session starts a new one, and Claude does not see the earlier messages. Default: 30. Set to 0 to disable cleanup.")]
     [DefaultValue(30)]
     public int KeepActivityDays { get; set; } = 30;
 }
