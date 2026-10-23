@@ -606,6 +606,27 @@ public partial class ChatWebView : UserControl
             $"loadMessages({JsonSerializer.Serialize(snapshot.Select(MaterializeImages))})");
     }
 
+    /// <summary>
+    /// Opens the find bar over the chat and gives it the keyboard focus. The
+    /// page opens it on its own when Ctrl+F is pressed inside it; this is for
+    /// the key pressed anywhere else in the window.
+    /// </summary>
+    public Task OpenFindAsync()
+    {
+        WebView.Focus();
+        return ExecuteOrQueueAsync("openFind()");
+    }
+
+    /// <summary>
+    /// Moves to the next match (+1) or the previous one (-1), or opens the find
+    /// bar when it is closed. For F3 and Shift+F3 pressed outside the page.
+    /// </summary>
+    public Task FindNextAsync(int direction)
+    {
+        WebView.Focus();
+        return ExecuteOrQueueAsync($"findNext({(direction < 0 ? -1 : 1)})");
+    }
+
     public Task SetThemeColorsAsync(Dictionary<string, string> colors)
     {
         var json = JsonSerializer.Serialize(colors);
