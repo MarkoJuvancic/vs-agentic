@@ -664,7 +664,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 {
                     _logger.LogInformation("[ClaudeCli] Message cancelled before its turn ended");
                     FinalizeOpenBlocks(turn);
-                    EndSubagents(includeBackground: false);
+                    // A message cancelled in the queue owns no subagents; the
+                    // running turn's go on.
+                    if (turn.Started)
+                        EndSubagents(includeBackground: false);
                     turn.End();
                 }
                 return;
