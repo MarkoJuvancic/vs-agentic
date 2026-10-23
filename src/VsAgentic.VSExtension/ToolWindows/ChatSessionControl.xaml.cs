@@ -69,6 +69,7 @@ public partial class ChatSessionControl : UserControl
 
         // Apply VS theme colors to the WebView
         ApplyThemeColors();
+        ApplyShellBrushes();
 
         // Re-apply when VS theme changes
         VSColorTheme.ThemeChanged += OnThemeChanged;
@@ -82,6 +83,62 @@ public partial class ChatSessionControl : UserControl
         // adopting the level it was born into, not the user changing it.
         ChatZoom.Changed += OnZoomChanged;
         ApplyZoom(ChatZoom.Level);
+
+        // Three ways to say "seen it", between them covering everywhere a
+        // pending Completed indicator should stop:
+        //
+        //  - GotFocus bubbles from whichever descendant actually receives it,
+        //    so it fires as soon as VS activates the tab and focus lands
+        //    inside — the input box, a banner button, anywhere.
+        //  - PreviewMouseDown catches a click on the chrome that takes no
+        //    focus: the status bar, the usage meters, a header, bare margin.
+        //  - Clicked is relayed by the page, because the transcript itself is
+        //    a browser child window that WPF sees no mouse events from.
+        GotFocus += (_, _) => viewModel.NotifySessionSeen();
+        ChatWebView.Clicked += OnChatClicked;
+
+        // Separately from "seen it", the view model wants to know whether the
+        // user is in this session at the moment a turn ends, so one that ends
+        // under their nose raises no indicator at all. Same two halves: WPF
+        // reports its own chrome, the page reports itself.
+        IsKeyboardFocusWithinChanged += OnKeyboardFocusWithinChanged;
+        ChatWebView.ContentFocusChanged += OnChatContentFocusChanged;
+    }
+
+    private void OnChatClicked()
+    {
+        if (DataContext is ChatSessionViewModel vm) vm.NotifySessionSeen();
+    }
+
+    private void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (DataContext is ChatSessionViewModel vm) vm.NotifySessionSeen();
+    }
+
+    /// <summary>True while the page reports focus; see <see cref="UpdateSessionFocus"/>.</summary>
+    private bool _chatContentFocused;
+
+    private void OnChatContentFocusChanged(bool hasFocus)
+    {
+        _chatContentFocused = hasFocus;
+        UpdateSessionFocus();
+    }
+
+    private void OnKeyboardFocusWithinChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+        UpdateSessionFocus();
+
+    /// <summary>
+    /// Answers "is the user in this session right now?". Keyboard focus rather
+    /// than logical focus or visibility: it goes false when another pane takes
+    /// over and when VS is sent to the background, both of which mean the user
+    /// is no longer watching — whereas a docked window stays visible either
+    /// way. The page's own answer is OR'd in because focus inside the browser
+    /// child window does not always register as focus within the host.
+    /// </summary>
+    private void UpdateSessionFocus()
+    {
+        if (DataContext is ChatSessionViewModel vm)
+            vm.IsSessionFocused = IsKeyboardFocusWithin || _chatContentFocused;
     }
 
     /// <summary>
@@ -94,6 +151,9 @@ public partial class ChatSessionControl : UserControl
         VSColorTheme.ThemeChanged -= OnThemeChanged;
         ChatZoom.Changed -= OnZoomChanged;
         ChatWebView.ZoomChangeRequested -= OnZoomChangeRequested;
+        ChatWebView.Clicked -= OnChatClicked;
+        ChatWebView.ContentFocusChanged -= OnChatContentFocusChanged;
+        IsKeyboardFocusWithinChanged -= OnKeyboardFocusWithinChanged;
 
         // A popup is its own window and would outlive the pane it belongs to.
         _zoomToastTimer?.Stop();
@@ -102,7 +162,11 @@ public partial class ChatSessionControl : UserControl
 
     private void OnThemeChanged(ThemeChangedEventArgs e)
     {
-        Dispatcher.BeginInvoke(new Action(() => ApplyThemeColors()));
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            ApplyThemeColors();
+            ApplyShellBrushes();
+        }));
     }
 
     private void ApplyThemeColors()
@@ -115,13 +179,31 @@ public partial class ChatSessionControl : UserControl
             colors[cssVar] = $"#{wpfColor.R:X2}{wpfColor.G:X2}{wpfColor.B:X2}";
         }
 
+        // Where the shell palette has the color, it comes from the theme the
+        // user picked; the environment key is what a Visual Studio 2026 theme
+        // leaves to its fallback. See ShellPalette.
+        void MapShell(string cssVar, string shellColor, ThemeResourceKey fallback)
+        {
+            if (ShellPalette.TryGetColor(shellColor) is not Color color)
+            {
+                Map(cssVar, fallback);
+                return;
+            }
+
+            // Some of these colors are meant to sit over what is behind them,
+            // a control edge above all, so the alpha is passed on.
+            colors[cssVar] = color.A == byte.MaxValue
+                ? $"#{color.R:X2}{color.G:X2}{color.B:X2}"
+                : $"#{color.R:X2}{color.G:X2}{color.B:X2}{color.A:X2}";
+        }
+
         Map("--bg-primary", EnvironmentColors.ToolWindowBackgroundColorKey);
         Map("--bg-secondary", EnvironmentColors.CommandBarGradientBeginColorKey);
-        Map("--bg-input", EnvironmentColors.ComboBoxBackgroundColorKey);
-        Map("--text-primary", EnvironmentColors.ToolWindowTextColorKey);
-        Map("--text-heading", EnvironmentColors.ToolWindowTextColorKey);
-        Map("--text-muted", EnvironmentColors.CommandBarTextInactiveColorKey);
-        Map("--border", EnvironmentColors.ToolWindowBorderColorKey);
+        MapShell("--bg-input", "ControlFillActiveInput", EnvironmentColors.ComboBoxBackgroundColorKey);
+        MapShell("--text-primary", "TextFillPrimary", EnvironmentColors.ToolWindowTextColorKey);
+        MapShell("--text-heading", "TextFillPrimary", EnvironmentColors.ToolWindowTextColorKey);
+        MapShell("--text-muted", "TextFillSecondary", EnvironmentColors.CommandBarTextInactiveColorKey);
+        MapShell("--border", "ControlStrokeDefault", EnvironmentColors.ToolWindowBorderColorKey);
         Map("--code-bg", EnvironmentColors.ToolWindowContentGridColorKey);
         Map("--pre-bg", EnvironmentColors.ToolWindowBackgroundColorKey);
         Map("--thinking-bg", EnvironmentColors.CommandBarGradientBeginColorKey);
@@ -155,46 +237,37 @@ public partial class ChatSessionControl : UserControl
     /// often violet and clashes with the VS theme.
     /// </remarks>
     private static System.Drawing.Color ThemeAccent() =>
-        // A theme written for the Visual Studio 2026 shell defines the Shell
-        // category and leaves the Environment category to its fallback theme.
-        // PanelHyperlink then carries the fallback's color, not the theme's, so
-        // ask the shell first and keep the environment key for VS 2022.
-        TryGetShellColor("HyperlinkFillPrimary")
-            ?? VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
+        // A theme written for the Visual Studio 2026 shell leaves PanelHyperlink
+        // to its fallback theme, so ask the shell palette first and keep the
+        // environment key for Visual Studio 2022. See ShellPalette.
+        ShellPalette.TryGetColor("HyperlinkFillPrimary") is Color accent
+            ? System.Drawing.Color.FromArgb(accent.A, accent.R, accent.G, accent.B)
+            : VSColorTheme.GetThemedColor(EnvironmentColors.PanelHyperlinkColorKey);
 
     /// <summary>
-    /// Reads one color of the Visual Studio 2026 shell palette. Returns null on
-    /// Visual Studio 2022, whose shell has no such category, and on any theme
-    /// that leaves the color undefined.
+    /// The environment brushes the chrome of this window binds to, each paired
+    /// with the shell color that carries the same meaning in a Visual Studio
+    /// 2026 theme.
     /// </summary>
-    private static System.Drawing.Color? TryGetShellColor(string name)
+    // VsBrushes exposes its keys as object, which is also what a resource
+    // dictionary takes, so the pairs are held that way.
+    private static readonly (object Brush, string ShellColor)[] ChromeBrushes =
     {
-        var application = Application.Current;
-        if (application is null)
-            return null;
-
-        // The palette stores these colors as background values, so that is the
-        // key type the theme registers them under.
-        var key = new ThemeResourceKey(ShellCategory, name, ThemeResourceKeyType.BackgroundColor);
-
-        var resource = application.TryFindResource(key);
-        var color = resource switch
-        {
-            Color themeColor => themeColor,
-            SolidColorBrush themeBrush => themeBrush.Color,
-            _ => (Color?)null,
-        };
-
-        return color is Color found
-            ? System.Drawing.Color.FromArgb(found.A, found.R, found.G, found.B)
-            : null;
-    }
+        (VsBrushes.ComboBoxBackgroundKey, "ControlFillActiveInput"),
+        (VsBrushes.ComboBoxBorderKey, "ControlStrokeDefault"),
+        (VsBrushes.WindowTextKey, "TextFillPrimary"),
+        (VsBrushes.GrayTextKey, "TextFillSecondary"),
+        (VsBrushes.PanelHyperlinkKey, "HyperlinkFillPrimary"),
+        (VsBrushes.CommandBarMouseOverBackgroundGradientKey, "SubtleFillSecondary"),
+        (VsBrushes.CommandBarMouseDownBackgroundGradientKey, "SubtleFillTertiary"),
+        (VsBrushes.CommandBarSelectedKey, "SubtleFillTertiary"),
+    };
 
     /// <summary>
-    /// Category of the shell palette that Visual Studio 2026 themes are built
-    /// on. Named "Shell" in a theme's .pkgdef.
+    /// Points the prompt box and the status row at the shell palette, so that a
+    /// theme which defines only the shell colors still reaches them.
     /// </summary>
-    private static readonly Guid ShellCategory = new("73708DED-2D56-4AAD-B8EB-73B20D3F4BFF");
+    private void ApplyShellBrushes() => ShellPalette.OverrideBrushes(this, ChromeBrushes);
 
     private static System.Drawing.Color Blend(System.Drawing.Color from, System.Drawing.Color to, double amount)
     {
@@ -238,6 +311,45 @@ public partial class ChatSessionControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Attaches a selection sent from the editor's context menu. The input box
+    /// takes focus once the window has come forward, so the user can type the
+    /// question straight away.
+    /// </summary>
+    public void AttachFromEditor(EditorContext context)
+    {
+        if (DataContext is not ChatSessionViewModel vm) return;
+
+        vm.Attach(context);
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => InputTextBox.Focus()));
+    }
+
+    private void AcceptEditorContext_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is ChatSessionViewModel vm &&
+            sender is FrameworkElement { DataContext: EditorContext suggestion })
+        {
+            vm.AcceptEditorContext(suggestion);
+
+            // The next thing the user does is type the question about it.
+            InputTextBox.Focus();
+        }
+    }
+
+    // The selection only changes while the user is in the editor, so coming
+    // back to the input box is when the suggestion has to catch up. The mouse
+    // gets there first when the user goes straight for the suggestion, and
+    // the button must name what a click attaches.
+    private void InputTextBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        (DataContext as ChatSessionViewModel)?.RefreshEditorContext();
+    }
+
+    private void PromptBox_MouseEnter(object sender, MouseEventArgs e)
+    {
+        (DataContext as ChatSessionViewModel)?.RefreshEditorContext();
+    }
+
     // ------------------------------------------------------------------
     // Zoom
     // ------------------------------------------------------------------
@@ -275,6 +387,17 @@ public partial class ChatSessionControl : UserControl
         ChatZoom.Step(step.Value);
         e.Handled = true;
     }
+
+    /// <summary>
+    /// Opens the find bar over the chat. Called by the tool window for Edit.Find.
+    /// </summary>
+    public void OpenFind() => _ = ChatWebView.OpenFindAsync();
+
+    /// <summary>
+    /// Steps through the matches. Called by the tool window for Edit.FindNext
+    /// (+1) and Edit.FindPrevious (-1).
+    /// </summary>
+    public void FindNext(int direction) => _ = ChatWebView.FindNextAsync(direction);
 
     private void OnZoomChangeRequested(int step) => ChatZoom.Step(step);
 
