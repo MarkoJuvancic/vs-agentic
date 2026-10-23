@@ -489,6 +489,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         chatService.BackgroundTasksChanged += OnChatServiceBackgroundTasksChanged;
 
         InitializeUsage(chatService, options.Value);
+        InitializeSlashCommands();
     }
 
     // ── Background tasks ──────────────────────────────────────────────────
@@ -1340,6 +1341,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             }
             // Static: without this, a closed session stays reachable from the catalog.
             ClaudeModelCatalog.ReportedChanged -= OnReportedModelsChanged;
+            ClaudeCommandCatalog.ReportedChanged -= OnReportedCommandsChanged;
         }
         catch { }
         try { (_chatService as IDisposable)?.Dispose(); } catch { }
