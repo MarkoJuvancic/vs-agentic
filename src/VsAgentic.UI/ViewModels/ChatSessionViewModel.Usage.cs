@@ -480,7 +480,14 @@ public partial class ChatSessionViewModel
         if (known is not null) return known;
         if (alias.Length == 0) return _modelOptions[0];
 
-        var custom = new ModelOption(new ClaudeModelInfo(alias, alias));
+        // A full model id ("claude-opus-5", a fixed version picked from the
+        // CLI's list before the CLI has answered this time) gets its readable
+        // name, as the button shows it. Anything else stays as typed, so a typo
+        // in the setting is still visible.
+        var name = alias.StartsWith("claude-", StringComparison.OrdinalIgnoreCase)
+            ? ClaudeModelCatalog.DisplayNameFor(alias)
+            : alias;
+        var custom = new ModelOption(new ClaudeModelInfo(alias, name));
         _modelOptions.Add(custom);
         RaiseModelListsChanged();
         return custom;
