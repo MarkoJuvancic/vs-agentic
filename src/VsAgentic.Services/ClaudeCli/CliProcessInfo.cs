@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using VsAgentic.Services.Configuration;
 
 namespace VsAgentic.Services.ClaudeCli;
 
@@ -61,12 +62,62 @@ public sealed class CliCapabilities
     public override string ToString() => _names.Count == 0 ? "(none)" : string.Join(", ", _names.OrderBy(n => n));
 }
 
-/// <summary>A model the CLI offers, from its answer to <c>initialize</c>.</summary>
+/// <summary>
+/// A model the CLI offers, from its answer to <c>initialize</c>.
+/// <see cref="SupportsEffort"/> is null when the CLI does not send the field.
+/// </summary>
 public sealed record CliModelInfo(
     string Value,
     string? DisplayName,
     string? Description,
-    IReadOnlyList<string> SupportedEffortLevels);
+    string? ResolvedModel,
+    bool? SupportsEffort,
+    IReadOnlyList<string> SupportedEffortLevels)
+{
+    /// <summary>The row the CLI uses for "no model chosen"; the picker's Default.</summary>
+    public const string DefaultValue = "default";
+
+    /// <summary>
+    /// The list as the model picker shows it. The CLI's <c>default</c> row
+    /// becomes the entry with an empty alias, which sends no <c>--model</c>.
+    ///
+    /// A CLI that sends no effort fields for any model has not said what the
+    /// models support, which is not the same as saying they support nothing.
+    /// Its entries then leave <see cref="ClaudeModelInfo.SupportedEfforts"/>
+    /// null. CLI 2.1.296 sends the fields only for models that have effort:
+    /// the Haiku 4.5 row has neither.
+    /// </summary>
+    public static IReadOnlyList<ClaudeModelInfo> ToCatalog(IReadOnlyList<CliModelInfo> models)
+    {
+        var effortKnown = models.Any(m => m.SupportsEffort is not null || m.SupportedEffortLevels.Count > 0);
+
+        return models
+            .Select(m => new ClaudeModelInfo(
+                m.Value == DefaultValue ? "" : m.Value,
+                m.DisplayName ?? m.Value,
+                m.Description,
+                m.ResolvedModel,
+                effortKnown ? EffortsOf(m) : null))
+            .ToList();
+    }
+
+    private static IReadOnlyList<ClaudeEffort> EffortsOf(CliModelInfo m)
+    {
+        if (m.SupportsEffort != true && m.SupportedEffortLevels.Count == 0)
+            return Array.Empty<ClaudeEffort>();
+
+        var levels = m.SupportedEffortLevels
+            .Select(ClaudeEffortExtensions.FromCliValue)
+            .Where(e => e is not null)
+            .Select(e => e!.Value)
+            .ToList();
+
+        // Effort supported, levels not listed: offer them all, as before.
+        return levels.Count > 0
+            ? levels
+            : ((ClaudeEffort[])Enum.GetValues(typeof(ClaudeEffort))).Where(e => e != ClaudeEffort.Default).ToList();
+    }
+}
 
 /// <summary>A slash command or skill the CLI offers, from its answer to <c>initialize</c>.</summary>
 public sealed record CliCommandInfo(string Name, string? Description, string? ArgumentHint);
@@ -75,9 +126,9 @@ public sealed record CliCommandInfo(string Name, string? Description, string? Ar
 /// What the running CLI said about itself in its answer to <c>initialize</c>:
 /// its version, models, commands, output style and permission mode.
 ///
-/// Nothing reads the lists yet. They are parsed here, in one place, so the
-/// features that need them (the model picker, a slash command menu) do not
-/// each read the raw answer on their own.
+/// The lists are parsed here, in one place, so the features that need them
+/// (the model picker, a slash command menu) do not each read the raw answer
+/// on their own.
 /// </summary>
 public sealed class CliProcessInfo
 {
@@ -112,6 +163,11 @@ public sealed class CliProcessInfo
                     x.value!,
                     ReadString(x.m, "displayName"),
                     ReadString(x.m, "description"),
+                    ReadString(x.m, "resolvedModel"),
+                    x.m.TryGetProperty("supportsEffort", out var se)
+                        && se.ValueKind is JsonValueKind.True or JsonValueKind.False
+                            ? se.GetBoolean()
+                            : null,
                     ReadStrings(x.m, "supportedEffortLevels")))
                 .ToList();
         }
