@@ -58,6 +58,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private long _cacheCreationTokens;
     private long _contextTokens;
 
+    // The window the CLI itself applies, from the last result event. Null until
+    // then, and again after the model changes; the host then estimates it.
+    private long? _contextWindowTokens;
+
     private string? _currentModel;
 
     // The CLI can emit more than one assistant event carrying the same message
@@ -270,8 +274,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             case "user":
                 // The CLI echoes user messages and tool_results. The echo is
-                // where a failed tool call announces itself, so it is not
-                // entirely noise — see HandleUserEvent.
+                // where a failed tool call announces itself, and where an MCP
+                // tool's returned files arrive, so it is not entirely noise —
+                // see HandleUserEvent.
                 HandleUserEvent(evt);
                 return;
 
@@ -545,6 +550,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (!msg.TryGetProperty("content", out var contentArr)) return;
         if (contentArr.ValueKind != JsonValueKind.Array) return;
 
+        AttachResourceLinks(turn, evt, contentArr);
+
         foreach (var block in contentArr.EnumerateArray())
         {
             if (!block.TryGetProperty("type", out var bt)) continue;
@@ -560,6 +567,41 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             CompleteToolItem(turn, OutputItemStatus.Error);
         }
+    }
+
+    /// <summary>
+    /// Adds the files an MCP tool returned by reference to the body of its step.
+    /// The CLI lists them in <c>tool_use_result.resourceLinks</c>; the result
+    /// text carries them only as prose for the model. Like the error flag, this
+    /// reaches only the open step: the step closes when the next block starts,
+    /// so a call made in parallel with another one is already closed.
+    /// </summary>
+    private void AttachResourceLinks(TurnState turn, JsonElement evt, JsonElement contentArr)
+    {
+        var step = turn.ToolItem;
+        if (step == null) return;
+        if (!evt.TryGetProperty("tool_use_result", out var toolUseResult)) return;
+        if (toolUseResult.ValueKind != JsonValueKind.Object) return;
+        if (!toolUseResult.TryGetProperty("resourceLinks", out var linksProp)) return;
+
+        var forOpenStep = false;
+        foreach (var block in contentArr.EnumerateArray())
+        {
+            if (block.TryGetProperty("type", out var bt) && bt.GetString() == "tool_result"
+                && block.TryGetProperty("tool_use_id", out var tp) && tp.GetString() == step.Id)
+            {
+                forOpenStep = true;
+                break;
+            }
+        }
+        if (!forOpenStep) return;
+
+        var links = McpResourceLink.ParseList(linksProp);
+        if (links.Count == 0) return;
+
+        var list = McpResourceLink.FormatMarkdown(links);
+        step.Body = string.IsNullOrEmpty(step.Body) ? list : step.Body + "\n\n" + list;
+        _logger.LogInformation("[ClaudeCli] {Tool} returned {Count} resource link(s)", step.ToolName, links.Count);
     }
 
     private void HandleToolResultBlock(TurnState turn, JsonElement block)
@@ -606,6 +648,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (turn == null) return;
 
         FinalizeOpenBlocks(turn);
+        ReadContextWindow(evt);
 
         if (isError)
         {
@@ -651,13 +694,16 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 _outputListener.OnStepCompleted(errorItem);
             }
         }
-        else
+
+        // The CLI reports the session's running total, not the cost of this
+        // turn, and a process started with --resume carries the earlier turns
+        // in it. So the value replaces ours. A failed turn is billed too.
+        if (evt.TryGetProperty("total_cost_usd", out var cost)
+            && cost.ValueKind == JsonValueKind.Number
+            && cost.TryGetDecimal(out var totalCost))
         {
-            if (evt.TryGetProperty("cost_usd", out var cost) && cost.ValueKind == JsonValueKind.Number)
-            {
-                _cumulativeCostUsd += cost.GetDecimal();
-                RaiseUsageChanged();
-            }
+            _cumulativeCostUsd = totalCost;
+            RaiseUsageChanged();
         }
 
         // Signal SendMessageAsync to return.
@@ -1036,6 +1082,67 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         RaiseUsageChanged();
     }
 
+    /// <summary>
+    /// Takes the context window from the result's <c>modelUsage</c> block. The
+    /// CLI reports there the window it applies to each model, which already
+    /// accounts for long-context defaults and for
+    /// <c>CLAUDE_CODE_DISABLE_1M_CONTEXT</c>. The block has one entry per model
+    /// the turn used, so a subagent on another model adds a second entry; the
+    /// one that matches the session's model wins.
+    /// </summary>
+    private void ReadContextWindow(JsonElement evt)
+    {
+        if (!evt.TryGetProperty("modelUsage", out var modelUsage) || modelUsage.ValueKind != JsonValueKind.Object)
+            return;
+
+        var model = _currentModel;
+        long? matched = null, single = null;
+        var entries = 0;
+
+        foreach (var entry in modelUsage.EnumerateObject())
+        {
+            entries++;
+            if (entry.Value.ValueKind != JsonValueKind.Object) continue;
+
+            var window = ReadTokenCount(entry.Value, "contextWindow");
+            if (window <= 0) continue;
+
+            single = window;
+            if (model is not null && IsSameModel(entry.Name, model))
+            {
+                matched = window;
+                break;
+            }
+        }
+
+        // Without a model id to match, only an unambiguous block can be trusted.
+        var result = matched ?? (entries == 1 ? single : null);
+        if (result is null) return;
+
+        lock (_usageLock)
+        {
+            if (_contextWindowTokens == result) return;
+            _contextWindowTokens = result;
+        }
+
+        RaiseUsageChanged();
+    }
+
+    /// <summary>
+    /// The init event may name the model with a variant suffix
+    /// (<c>claude-opus-5[1m]</c>) that the <c>modelUsage</c> key leaves off.
+    /// </summary>
+    private static bool IsSameModel(string a, string b)
+    {
+        static string Base(string id)
+        {
+            var bracket = id.IndexOf('[');
+            return bracket > 0 ? id.Substring(0, bracket) : id;
+        }
+
+        return string.Equals(Base(a), Base(b), StringComparison.OrdinalIgnoreCase);
+    }
+
     private static long ReadTokenCount(JsonElement usage, string name) =>
         usage.TryGetProperty(name, out var p)
         && p.ValueKind == JsonValueKind.Number
@@ -1047,6 +1154,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     public SessionUsage GetUsage()
     {
         long input, output, cacheRead, cacheCreate, context;
+        long? contextWindow;
 
         lock (_usageLock)
         {
@@ -1055,6 +1163,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             cacheRead = _cacheReadTokens;
             cacheCreate = _cacheCreationTokens;
             context = _contextTokens;
+            contextWindow = _contextWindowTokens;
         }
 
         var (shortTotal, longTotal) = _usageLog.Totals(
@@ -1067,6 +1176,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             CacheReadTokens = cacheRead,
             CacheCreationTokens = cacheCreate,
             ContextTokens = context,
+            ContextWindowTokens = contextWindow,
             ShortWindowTokens = shortTotal,
             LongWindowTokens = longTotal,
             ShortWindowBudget = _options.EffectiveFiveHourBudget,
@@ -1089,12 +1199,23 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _currentModel = model;
         _logger.LogInformation("[ClaudeCli] Session model: {Model}", model ?? "(unknown)");
 
+        // The reported window belonged to the previous model. Until the next
+        // result reports the new one, the host estimates it from the model id.
+        bool hadWindow;
+        lock (_usageLock)
+        {
+            hadWindow = _contextWindowTokens is not null;
+            _contextWindowTokens = null;
+        }
+
         try { ModelChanged?.Invoke(model); }
         catch (Exception ex)
         {
             // Same reasoning as UsageChanged: the dispatcher loop comes first.
             _logger.LogError(ex, "[ClaudeCli] ModelChanged handler threw");
         }
+
+        if (hadWindow) RaiseUsageChanged();
     }
 
     public event Action<SessionUsage>? UsageChanged;
@@ -1212,6 +1333,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             _inputTokens = _outputTokens = _cacheReadTokens = _cacheCreationTokens = 0;
             _contextTokens = 0;
+            _contextWindowTokens = null;
             _countedMessageIds.Clear();
         }
 
