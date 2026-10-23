@@ -8,8 +8,12 @@ namespace VsAgentic.UI.ViewModels;
 /// <summary>One row of the menu under "/" in the chat input.</summary>
 public sealed class SlashCommandOption
 {
-    public const string CommandsGroup = "Commands";
-    public const string SkillsGroup = "Skills";
+    // The CLI's builtin flag marks everything that ships with Claude Code,
+    // its bundled skills (dataviz, verify …) as much as its commands; it is
+    // absent for plugin, user and project skills. There is no field that
+    // tells a command from a skill, so the groups say where a row comes from.
+    public const string CommandsGroup = "Claude Code";
+    public const string SkillsGroup = "Plugins and your own";
 
     // Commands that change what the model panel shows. Typed in the input,
     // the CLI would switch behind the panel's back; the menu opens the panel
@@ -37,7 +41,7 @@ public sealed class SlashCommandOption
 
     public string? Description { get; }
 
-    /// <summary>"Commands" for Claude Code's own, "Skills" for the rest.</summary>
+    /// <summary>"Claude Code" for what ships with it, "Plugins and your own" for the rest.</summary>
     public string Group { get; }
 
     /// <summary>Picking it opens the model panel rather than inserting the command.</summary>
