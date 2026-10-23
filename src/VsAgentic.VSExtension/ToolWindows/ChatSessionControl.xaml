@@ -197,6 +197,25 @@
 
         <controls:InverseBooleanConverter x:Key="InverseBool"/>
 
+        <!-- The full description of a list row, as a tooltip no wider than the
+             row and wrapped. A plain string tooltip does not wrap, so a long
+             description ran across the whole screen. Hidden for a row
+             without one. One instance per row. -->
+        <ToolTip x:Key="RowDescriptionTip" x:Shared="False">
+            <ToolTip.Style>
+                <Style TargetType="ToolTip">
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding Description}" Value="{x:Null}">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </ToolTip.Style>
+            <TextBlock Text="{Binding Description}"
+                       TextWrapping="Wrap"
+                       MaxWidth="{Binding PlacementTarget.ActualWidth, RelativeSource={RelativeSource AncestorType=ToolTip}}"/>
+        </ToolTip>
+
         <!-- The model panel (one button for model, effort and Fast mode). Rows
              and level buttons share the command bar's hover and pressed fills,
              like the pickers they replace. -->
@@ -958,7 +977,7 @@
                                                         <Button Style="{StaticResource PickerRowStyle}"
                                                                 Command="{Binding DataContext.PickModelCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                                                 CommandParameter="{Binding}"
-                                                                ToolTip="{Binding Description}">
+                                                                ToolTip="{StaticResource RowDescriptionTip}">
                                                             <Grid>
                                                                 <Grid.ColumnDefinitions>
                                                                     <ColumnDefinition Width="26"/>
