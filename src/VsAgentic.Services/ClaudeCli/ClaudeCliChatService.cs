@@ -206,21 +206,14 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         var reader = turn.TextDeltas.Reader;
         while (true)
         {
-            ValueTask<bool> wait;
-            try
-            {
-                wait = reader.WaitToReadAsync(cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                ClearActiveTurn(turn);
-                throw;
-            }
-
             bool more;
-            try { more = await wait.ConfigureAwait(false); }
+            try { more = await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false); }
             catch (OperationCanceledException)
             {
+                // Stop. Cancelling only our side would leave the CLI running
+                // the turn, tools included, with nothing on screen; and its
+                // last events would land in the next turn.
+                await InterruptTurnAsync(turn).ConfigureAwait(false);
                 ClearActiveTurn(turn);
                 throw;
             }
@@ -232,6 +225,41 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         ClearActiveTurn(turn);
     }
+
+    /// <summary>
+    /// Aborts the turn in the CLI and waits until the CLI has closed it.
+    ///
+    /// The CLI answers the interrupt at once and then sends the turn's result,
+    /// so waiting for the result means the turn is over: no tool runs on, and
+    /// the next message starts a clean turn. If the CLI does not answer, or
+    /// the result does not follow in time, we stop waiting and return, which
+    /// is where Stop used to leave things.
+    /// </summary>
+    private async Task InterruptTurnAsync(TurnState turn)
+    {
+        if (!_host.IsRunning || turn.Ended.Task.IsCompleted) return;
+
+        // Set before the request goes out: the result can arrive before the
+        // answer to the interrupt has been read.
+        turn.Interrupted = true;
+
+        var reply = await _control.SendAsync(StreamJsonProtocol.BuildInterrupt).ConfigureAwait(false);
+        if (!reply.Succeeded)
+        {
+            _logger.LogWarning("[ClaudeCli] interrupt failed: {Error}", reply.Error);
+            return;
+        }
+
+        var done = await Task.WhenAny(turn.Ended.Task, Task.Delay(InterruptResultTimeout)).ConfigureAwait(false);
+        if (done == turn.Ended.Task)
+            _logger.LogInformation("[ClaudeCli] Turn interrupted");
+        else
+            _logger.LogWarning("[ClaudeCli] interrupt answered, but the turn did not end within {Timeout}", InterruptResultTimeout);
+    }
+
+    // The CLI writes the interrupted turn's result right after its answer to
+    // the interrupt; a measured gap is a few milliseconds.
+    private static readonly TimeSpan InterruptResultTimeout = TimeSpan.FromSeconds(5);
 
     private void ClearActiveTurn(TurnState turn)
     {
@@ -293,7 +321,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 if (exit != null && !turn.ResultReceived)
                     EmitFatalError(DescribeExit(exit));
 
-                turn.TextDeltas.Writer.TryComplete();
+                turn.End();
             }
 
             // Background tasks are children of the CLI and end with it.
@@ -735,7 +763,18 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // A synthetic error message counts even if the result is not flagged:
         // its text was held back from the transcript and has to land somewhere.
         isError = isError || turn.ApiError != null;
-        if (isError)
+
+        // An interrupted turn ends with an error result (CLI 2.1.296:
+        // error_during_execution, terminal_reason "aborted_tools" or
+        // "aborted_streaming"). The user asked for that, so it is not shown as
+        // a failure; the chat says the turn was stopped. Other errors still are.
+        if (isError && turn.Interrupted
+            && CliProcessInfo.ReadString(evt, "subtype") == "error_during_execution")
+        {
+            _logger.LogInformation("[ClaudeCli] Interrupted turn ended ({Reason})",
+                CliProcessInfo.ReadString(evt, "terminal_reason") ?? "no reason given");
+        }
+        else if (isError)
         {
             var resultText = DescribeResultError(evt, turn.ApiErrorText);
             _logger.LogWarning("[ClaudeCli] CLI returned error result: {Result}", resultText);
@@ -792,7 +831,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
 
         // Signal SendMessageAsync to return.
-        turn.TextDeltas.Writer.TryComplete();
+        turn.End();
     }
 
     // ── Finalization helpers ───────────────────────────────────────────────
@@ -1665,10 +1704,26 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // which we hide from the UI step list).
         public HashSet<string> SuppressedToolUseIds { get; } = new HashSet<string>(StringComparer.Ordinal);
 
+        // Set by Stop before the interrupt goes to the CLI, so the error
+        // result that closes an interrupted turn is not shown as a failure.
+        public volatile bool Interrupted;
+
         public Channel<string> TextDeltas { get; } = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = true,
         });
+
+        // Completes when the turn's result arrives or the process exits.
+        // Unlike TextDeltas.Reader.Completion it does not wait for the reader
+        // to drain the text, which a stopped turn never does.
+        public TaskCompletionSource<bool> Ended { get; } =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void End()
+        {
+            TextDeltas.Writer.TryComplete();
+            Ended.TrySetResult(true);
+        }
     }
 }
