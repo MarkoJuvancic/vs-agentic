@@ -359,8 +359,17 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// Called before the first user message is written. The request goes
     /// into the stdin queue synchronously, so the CLI reads it first; the
     /// answer arrives while the turn runs.
+    ///
+    /// Fast mode, when the user asked for it, follows the same way: a new
+    /// process starts without it, and the request has to be read before the
+    /// message for the first turn to run fast.
     /// </summary>
-    private void InitializeProcess() => _ = InitializeProcessAsync();
+    private void InitializeProcess()
+    {
+        _ = InitializeProcessAsync();
+        if (_fastModeRequested)
+            _ = SendFastModeAsync(true);
+    }
 
     private async Task InitializeProcessAsync()
     {
@@ -382,7 +391,64 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         try { ClaudeModelCatalog.SetReported(CliModelInfo.ToCatalog(info.Models)); }
         catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] Model list handler threw"); }
 
+        if (info.FastMode is { } fast)
+            SetFastModeStatus(fast);
+
         await RefreshAppliedEffortAsync().ConfigureAwait(false);
+    }
+
+    // ── Fast mode ─────────────────────────────────────────────────────────
+    // What the user asked for is kept apart from what the CLI reports. The
+    // request lasts for the session and is sent again to every new process;
+    // the status says whether the CLI actually serves fast, which depends on
+    // the model, the plan and the account.
+
+    private volatile bool _fastModeRequested;
+    private FastModeStatus _fastMode = FastModeStatus.Unknown;
+
+    public bool FastModeRequested => _fastModeRequested;
+
+    public FastModeStatus FastMode => _fastMode;
+
+    public event Action<FastModeStatus>? FastModeChanged;
+
+    public void SetFastMode(bool on)
+    {
+        if (_fastModeRequested == on) return;
+        _fastModeRequested = on;
+
+        if (_host.IsRunning)
+            _ = SendFastModeAsync(on);
+        else
+            _logger.LogInformation("[ClaudeCli] Fast mode {State}; applies when the CLI starts", on ? "on" : "off");
+    }
+
+    /// <summary>
+    /// Sends the fast mode setting as <c>apply_flag_settings</c>. Flag settings
+    /// live in the process only; nothing is written to the user's settings
+    /// files. The CLI reports the resulting state in the next
+    /// <c>system/init</c>, not in this answer.
+    /// </summary>
+    private async Task SendFastModeAsync(bool on)
+    {
+        EnsureDispatcherStarted();
+        var reply = await _control.SendAsync(requestId => StreamJsonProtocol.BuildFastMode(requestId, on))
+            .ConfigureAwait(false);
+
+        if (reply.Succeeded)
+            _logger.LogInformation("[ClaudeCli] Fast mode {State} sent to the CLI", on ? "on" : "off");
+        else
+            _logger.LogWarning("[ClaudeCli] CLI did not take fast mode {State}: {Error}", on ? "on" : "off", reply.Error);
+    }
+
+    private void SetFastModeStatus(FastModeStatus status)
+    {
+        if (_fastMode.SameAs(status)) return;
+        _fastMode = status;
+        _logger.LogInformation("[ClaudeCli] Fast mode: {Status}", status);
+
+        try { FastModeChanged?.Invoke(status); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] FastModeChanged handler threw"); }
     }
 
     /// <summary>
@@ -619,6 +685,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // every change.
         if (init.Model is not null)
             SetCurrentModel(init.Model);
+
+        if (init.FastMode is { } fast)
+            SetFastModeStatus(fast);
 
         // Diagnostic: dump the available tool names so we can verify whether
         // AskUserQuestion is registered in headless mode.
@@ -1047,6 +1116,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     private void HandleResultEvent(JsonElement evt)
     {
+        // Before the turn check: the state can change during a turn (a rate
+        // limit starts a cooldown), whoever the result belongs to.
+        if (FastModeStatus.Read(evt) is { } fast)
+            SetFastModeStatus(fast);
+
         var isError = evt.TryGetProperty("is_error", out var ie) && ie.ValueKind == JsonValueKind.True;
 
         // The CLI removed its transcript (cleanupPeriodDays), so this id can
@@ -1931,6 +2005,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _logger.LogInformation("[ClaudeCli] Session cleared (process killed)");
         SetCurrentModel(null);
         SetAppliedEffort(null);
+        // The request stays: it is the user's choice for the session, and the
+        // next process gets it. The status comes from that process.
+        SetFastModeStatus(FastModeStatus.Unknown);
         RaiseUsageChanged();
     }
 

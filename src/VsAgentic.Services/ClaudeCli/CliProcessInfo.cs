@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using VsAgentic.Services.Abstractions;
 using VsAgentic.Services.Configuration;
 
 namespace VsAgentic.Services.ClaudeCli;
@@ -72,7 +73,8 @@ public sealed record CliModelInfo(
     string? Description,
     string? ResolvedModel,
     bool? SupportsEffort,
-    IReadOnlyList<string> SupportedEffortLevels)
+    IReadOnlyList<string> SupportedEffortLevels,
+    bool SupportsFastMode = false)
 {
     /// <summary>The row the CLI uses for "no model chosen"; the picker's Default.</summary>
     public const string DefaultValue = "default";
@@ -97,7 +99,8 @@ public sealed record CliModelInfo(
                 m.DisplayName ?? m.Value,
                 m.Description,
                 m.ResolvedModel,
-                effortKnown ? EffortsOf(m) : null))
+                effortKnown ? EffortsOf(m) : null,
+                m.SupportsFastMode))
             .ToList();
     }
 
@@ -141,6 +144,9 @@ public sealed class CliProcessInfo
     /// <summary>The plan the CLI is signed in with ("Claude Max"); null for an API key.</summary>
     public string? SubscriptionType { get; private set; }
 
+    /// <summary>Null for a CLI that does not report fast mode.</summary>
+    public FastModeStatus? FastMode { get; private set; }
+
     internal static CliProcessInfo Read(JsonElement response)
     {
         var info = new CliProcessInfo
@@ -148,6 +154,7 @@ public sealed class CliProcessInfo
             Version = ReadString(response, "claude_code_version"),
             OutputStyle = ReadString(response, "output_style"),
             PermissionMode = ReadString(response, "current_permission_mode"),
+            FastMode = FastModeStatus.Read(response),
         };
 
         if (response.TryGetProperty("account", out var account) && account.ValueKind == JsonValueKind.Object)
@@ -168,7 +175,8 @@ public sealed class CliProcessInfo
                         && se.ValueKind is JsonValueKind.True or JsonValueKind.False
                             ? se.GetBoolean()
                             : null,
-                    ReadStrings(x.m, "supportedEffortLevels")))
+                    ReadStrings(x.m, "supportedEffortLevels"),
+                    x.m.TryGetProperty("supportsFastMode", out var sf) && sf.ValueKind == JsonValueKind.True))
                 .ToList();
         }
 
@@ -210,6 +218,7 @@ internal sealed class CliInitEvent
     public string? PermissionMode { get; private set; }
     public CliCapabilities Capabilities { get; private set; } = CliCapabilities.None;
     public IReadOnlyList<string> Tools { get; private set; } = Array.Empty<string>();
+    public FastModeStatus? FastMode { get; private set; }
 
     public static CliInitEvent Read(JsonElement evt)
     {
@@ -220,6 +229,7 @@ internal sealed class CliInitEvent
             Version = CliProcessInfo.ReadString(evt, "claude_code_version"),
             PermissionMode = CliProcessInfo.ReadString(evt, "permissionMode"),
             Capabilities = CliCapabilities.Read(evt),
+            FastMode = FastModeStatus.Read(evt),
         };
 
         if (evt.TryGetProperty("tools", out var tools) && tools.ValueKind == JsonValueKind.Array)

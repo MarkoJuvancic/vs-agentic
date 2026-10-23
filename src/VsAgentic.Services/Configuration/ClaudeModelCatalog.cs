@@ -75,13 +75,21 @@ public sealed class ClaudeModelInfo
         string displayName,
         string? description,
         string? resolvedModel,
-        IReadOnlyList<ClaudeEffort>? supportedEfforts)
+        IReadOnlyList<ClaudeEffort>? supportedEfforts,
+        bool supportsFastMode = false)
         : this(alias, displayName)
     {
         Description = description;
         ResolvedModel = resolvedModel;
         SupportedEfforts = supportedEfforts;
+        SupportsFastMode = supportsFastMode;
     }
+
+    /// <summary>
+    /// Whether the CLI offers fast mode for this model. False for built-in
+    /// entries, which do not know.
+    /// </summary>
+    public bool SupportsFastMode { get; }
 
     public string Alias { get; }
 
@@ -169,6 +177,7 @@ public static class ClaudeModelCatalog
                 && x.DisplayName == y.DisplayName
                 && x.Description == y.Description
                 && x.ResolvedModel == y.ResolvedModel
+                && x.SupportsFastMode == y.SupportsFastMode
                 && (x.SupportedEfforts ?? Array.Empty<ClaudeEffort>())
                     .SequenceEqual(y.SupportedEfforts ?? Array.Empty<ClaudeEffort>()))
             .All(same => same);
