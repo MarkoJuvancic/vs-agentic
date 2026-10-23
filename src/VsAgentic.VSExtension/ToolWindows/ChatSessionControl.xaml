@@ -846,7 +846,7 @@
                                              command reaches it through the list around the row. -->
                                         <Popup x:Name="ModelPickerPopup"
                                                PlacementTarget="{Binding ElementName=ModelPickerToggle}"
-                                               Placement="Top"
+                                               Placement="Custom"
                                                StaysOpen="False"
                                                AllowsTransparency="True"
                                                PopupAnimation="Fade"
