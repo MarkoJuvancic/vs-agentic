@@ -967,9 +967,14 @@
                                                                                     <Border x:Name="Chrome"
                                                                                             Background="Transparent"
                                                                                             Padding="0,3">
+                                                                                        <!-- The theme's text colour, set here: a
+                                                                                             Button's default style sets the system
+                                                                                             control text colour, black on a dark
+                                                                                             theme. -->
                                                                                         <TextBlock x:Name="Label"
                                                                                                    Text="{Binding ShortName}"
-                                                                                                   HorizontalAlignment="Center"/>
+                                                                                                   HorizontalAlignment="Center"
+                                                                                                   Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
                                                                                     </Border>
                                                                                     <ControlTemplate.Triggers>
                                                                                         <Trigger Property="IsMouseOver" Value="True">
@@ -992,10 +997,22 @@
                                                                 </ItemsControl.ItemTemplate>
                                                             </ItemsControl>
                                                         </Border>
+                                                        <!-- Hidden when there is nothing to say, so a
+                                                             chosen level leaves no empty line. -->
                                                         <TextBlock Text="{Binding EffortHint}"
                                                                    Margin="12,0,12,2"
                                                                    TextWrapping="Wrap"
-                                                                   Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                                                                   Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding EffortHint}" Value="">
+                                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
                                                     </StackPanel>
 
                                                     <!-- Only for a model the CLI offers fast mode for,
