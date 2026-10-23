@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -79,6 +80,15 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     // single mutable reference is enough.
     private TurnState? _activeTurn;
     private readonly object _activeTurnLock = new object();
+
+    // ── Subagents ─────────────────────────────────────────────────────────
+    // One stream of steps per subagent, keyed by the id of the Agent step that
+    // started it. The CLI tags each of its messages with that id
+    // (parent_tool_use_id). Not part of the turn: a subagent in the background
+    // goes on after the turn's result, and its steps still belong under its
+    // Agent step. Concurrent because the dispatcher of a process that has
+    // just been replaced can still be clearing it up.
+    private readonly ConcurrentDictionary<string, StepStream> _subagents = new ConcurrentDictionary<string, StepStream>(StringComparer.Ordinal);
 
     // ── Control requests ──────────────────────────────────────────────────
     // Everything we ask the running process (initialize, a model or effort
@@ -334,6 +344,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             // Background tasks are children of the CLI and end with it.
             SetBackgroundTasks(Array.Empty<BackgroundTask>());
+            EndSubagents(includeBackground: true);
 
             // So is any answer it still owed us. Only this process's channel:
             // a new process may already be running with requests of its own.
@@ -449,6 +460,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 {
                     _logger.LogInformation("[ClaudeCli] Message cancelled before its turn ended");
                     FinalizeOpenBlocks(turn);
+                    EndSubagents(includeBackground: false);
                     turn.End();
                 }
                 return;
@@ -493,6 +505,51 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             case "background_tasks_changed":
                 HandleBackgroundTasksChanged(evt);
                 return;
+
+            case "task_started":
+                HandleTaskStarted(evt);
+                return;
+
+            case "task_notification":
+                HandleTaskNotification(evt);
+                return;
+        }
+    }
+
+    // A subagent is a task as well. The CLI says here whether it runs in the
+    // background, which decides whether the end of the turn ends its steps.
+    private void HandleTaskStarted(JsonElement evt)
+    {
+        var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
+        if (toolUseId is null || !_subagents.TryGetValue(toolUseId, out var subagent)) return;
+
+        subagent.InBackground = evt.TryGetProperty("is_backgrounded", out var bg) && bg.ValueKind == JsonValueKind.True;
+    }
+
+    // The subagent is done (completed, failed or stopped). Whatever step it
+    // left open will get no further event.
+    private void HandleTaskNotification(JsonElement evt)
+    {
+        var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
+        if (toolUseId is null || !_subagents.TryGetValue(toolUseId, out var subagent)) return;
+
+        FinalizeOpenBlocks(subagent);
+        _subagents.TryRemove(toolUseId, out _);
+    }
+
+    /// <summary>
+    /// Closes the open steps of subagents that will send no more. At the end
+    /// of a turn those are the ones that ran in the foreground: a turn that
+    /// was stopped ends without their task notification. Background subagents
+    /// go on until the process exits.
+    /// </summary>
+    private void EndSubagents(bool includeBackground)
+    {
+        foreach (var entry in _subagents.ToList())
+        {
+            if (entry.Value.InBackground && !includeBackground) continue;
+            FinalizeOpenBlocks(entry.Value);
+            _subagents.TryRemove(entry.Key, out _);
         }
     }
 
@@ -559,8 +616,41 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     public event Action<IReadOnlyList<BackgroundTask>>? BackgroundTasksChanged;
 
+    /// <summary>
+    /// The subagent a message comes from, or null for the main conversation.
+    /// A message from a subagent whose Agent step we never showed (it started
+    /// before this process, or under a step we hide) is dropped through
+    /// <paramref name="known"/> = false, so it cannot land among the steps of
+    /// whatever turn is running.
+    /// </summary>
+    private StepStream? SubagentOf(JsonElement evt, out bool known)
+    {
+        known = true;
+        var parent = CliProcessInfo.ReadString(evt, "parent_tool_use_id");
+        if (parent is null) return null;
+
+        if (_subagents.TryGetValue(parent, out var subagent)) return subagent;
+
+        known = false;
+        _logger.LogDebug("[ClaudeCli] Message from a subagent with no step on screen ({Parent})", parent);
+        return null;
+    }
+
     private async Task HandleAssistantEventAsync(JsonElement evt)
     {
+        // Subagents first: their messages are tied to an Agent step, not to
+        // the turn, and a background subagent goes on between turns.
+        var subagent = SubagentOf(evt, out var known);
+        if (!known) return;
+        if (subagent is not null)
+        {
+            if (!evt.TryGetProperty("message", out var subMsg)) return;
+            AccountUsage(subMsg, fromSubagent: true);
+            if (subMsg.TryGetProperty("content", out var subContent) && subContent.ValueKind == JsonValueKind.Array)
+                await HandleContentBlocksAsync(subagent, subContent).ConfigureAwait(false);
+            return;
+        }
+
         // The first assistant message of a turn names the user message it
         // answers. That starts a queued turn as well, should its "started"
         // lifecycle event go missing.
@@ -581,7 +671,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         // Before the content check: a message can carry usage worth counting
         // even when its content block is one we do not render.
-        AccountUsage(msg);
+        AccountUsage(msg, fromSubagent: false);
 
         // A failed sign-in arrives as a synthetic assistant message whose text
         // is the error, tagged with "error": "authentication_failed". The tag
@@ -612,31 +702,36 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (!msg.TryGetProperty("content", out var contentArr)) return;
         if (contentArr.ValueKind != JsonValueKind.Array) return;
 
+        await HandleContentBlocksAsync(turn, contentArr).ConfigureAwait(false);
+    }
+
+    private async Task HandleContentBlocksAsync(StepStream stream, JsonElement contentArr)
+    {
         foreach (var block in contentArr.EnumerateArray())
         {
             if (!block.TryGetProperty("type", out var bt)) continue;
             switch (bt.GetString())
             {
                 case "thinking":
-                    HandleThinkingBlock(turn, block);
+                    HandleThinkingBlock(stream, block);
                     break;
 
                 case "text":
-                    HandleTextBlock(turn, block);
+                    HandleTextBlock(stream, block);
                     break;
 
                 case "tool_use":
-                    await HandleToolUseBlockAsync(turn, block).ConfigureAwait(false);
+                    await HandleToolUseBlockAsync(stream, block).ConfigureAwait(false);
                     break;
 
                 case "tool_result":
-                    HandleToolResultBlock(turn, block);
+                    HandleToolResultBlock(stream, block);
                     break;
             }
         }
     }
 
-    private void HandleThinkingBlock(TurnState turn, JsonElement block)
+    private void HandleThinkingBlock(StepStream turn, JsonElement block)
     {
         FinalizeResponseItem(turn);
         FinalizeToolItem(turn);
@@ -652,7 +747,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 Id = Guid.NewGuid().ToString("N"),
                 ToolName = "Thinking",
                 Title = "Thinking...",
-                Status = OutputItemStatus.Pending
+                Status = OutputItemStatus.Pending,
+                ParentId = turn.ParentId
             };
             _outputListener.OnStepStarted(turn.ThinkingItem);
         }
@@ -665,7 +761,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _outputListener.OnStepUpdated(turn.ThinkingItem);
     }
 
-    private void HandleTextBlock(TurnState turn, JsonElement block)
+    private void HandleTextBlock(StepStream turn, JsonElement block)
     {
         FinalizeThinkingItem(turn);
         FinalizeToolItem(turn);
@@ -680,7 +776,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 Id = Guid.NewGuid().ToString("N"),
                 ToolName = "AI",
                 Title = "Responding",
-                Status = OutputItemStatus.Pending
+                Status = OutputItemStatus.Pending,
+                ParentId = turn.ParentId
             };
             _outputListener.OnStepStarted(turn.ResponseItem);
         }
@@ -689,10 +786,13 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         turn.ResponseItem.Delta = text;
         turn.ResponseItem.Body = turn.ResponseBuilder.ToString();
         _outputListener.OnStepUpdated(turn.ResponseItem);
-        turn.TextDeltas.Writer.TryWrite(text);
+
+        // A subagent's text is its report to the main conversation, not the
+        // reply to the user.
+        (turn as TurnState)?.TextDeltas.Writer.TryWrite(text);
     }
 
-    private Task HandleToolUseBlockAsync(TurnState turn, JsonElement block)
+    private Task HandleToolUseBlockAsync(StepStream turn, JsonElement block)
     {
         var toolName = block.TryGetProperty("name", out var np) ? np.GetString() ?? "tool" : "tool";
         var toolId = block.TryGetProperty("id", out var ip) ? ip.GetString() ?? "" : "";
@@ -724,16 +824,53 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             toolBody = FormatToolInput(toolName, input);
         }
 
-        turn.ToolItem = new OutputItem
+        var item = new OutputItem
         {
             Id = toolId,
             ToolName = toolName,
             Title = toolTitle,
             Status = OutputItemStatus.Pending,
-            Body = toolBody
+            Body = toolBody,
+            ParentId = turn.ParentId
         };
-        _outputListener.OnStepStarted(turn.ToolItem);
+        _outputListener.OnStepStarted(item);
+
+        if (toolName == "Agent" && toolId.Length > 0)
+        {
+            // Not the open tool step: the next block would close that, and an
+            // Agent step has to stay open while its subagent runs, next to
+            // any other Agent step started in the same message. Its own
+            // tool_result closes it.
+            turn.OpenAgentSteps[toolId] = item;
+
+            // Registered before the CLI starts the subagent, so its first
+            // message already finds where it goes.
+            _subagents[toolId] = new StepStream(toolId);
+        }
+        else
+        {
+            turn.ToolItem = item;
+        }
+
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Closes an Agent step if <paramref name="block"/> is its tool_result.
+    /// That arrives when the subagent hands back, or at once for a subagent
+    /// sent to the background.
+    /// </summary>
+    private bool CloseAgentStep(StepStream stream, JsonElement block)
+    {
+        var toolUseId = block.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+        if (toolUseId is null || !stream.OpenAgentSteps.TryGetValue(toolUseId, out var item)) return false;
+
+        stream.OpenAgentSteps.Remove(toolUseId);
+        var isError = block.TryGetProperty("is_error", out var ep) && ep.ValueKind == JsonValueKind.True;
+        item.Status = isError ? OutputItemStatus.Error : OutputItemStatus.Success;
+        item.Delta = null;
+        _outputListener.OnStepCompleted(item);
+        return true;
     }
 
     /// <summary>
@@ -745,8 +882,16 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// </summary>
     private void HandleUserEvent(JsonElement evt)
     {
+        var subagent = SubagentOf(evt, out var known);
+        if (!known) return;
+        if (subagent is not null)
+        {
+            HandleSubagentToolResults(subagent, evt);
+            return;
+        }
+
         var turn = RunningTurn();
-        if (turn?.ToolItem == null) return;
+        if (turn == null) return;
 
         if (!evt.TryGetProperty("message", out var msg)) return;
         if (!msg.TryGetProperty("content", out var contentArr)) return;
@@ -758,6 +903,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             if (!block.TryGetProperty("type", out var bt)) continue;
             if (bt.GetString() != "tool_result") continue;
+            if (CloseAgentStep(turn, block)) continue;
             if (!block.TryGetProperty("is_error", out var ep)) continue;
             if (ep.ValueKind != JsonValueKind.True) continue;
 
@@ -768,6 +914,31 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             if (turn.ToolItem == null || toolUseId != turn.ToolItem.Id) continue;
 
             CompleteToolItem(turn, OutputItemStatus.Error);
+        }
+    }
+
+    /// <summary>
+    /// Closes a subagent's step as soon as its result is in. A subagent's next
+    /// message can be a while coming, and its step would spin until then.
+    /// The first user message of a subagent is the prompt it was given; the
+    /// Agent step already shows that, so it is skipped with everything else
+    /// that is not a tool result.
+    /// </summary>
+    private void HandleSubagentToolResults(StepStream subagent, JsonElement evt)
+    {
+        if (!evt.TryGetProperty("message", out var msg)) return;
+        if (!msg.TryGetProperty("content", out var contentArr)) return;
+        if (contentArr.ValueKind != JsonValueKind.Array) return;
+
+        foreach (var block in contentArr.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type", out var bt) || bt.GetString() != "tool_result") continue;
+            if (CloseAgentStep(subagent, block)) continue;
+            var toolUseId = block.TryGetProperty("tool_use_id", out var tp) ? tp.GetString() : null;
+            if (subagent.ToolItem == null || toolUseId != subagent.ToolItem.Id) continue;
+
+            var isError = block.TryGetProperty("is_error", out var ep) && ep.ValueKind == JsonValueKind.True;
+            CompleteToolItem(subagent, isError ? OutputItemStatus.Error : OutputItemStatus.Success);
         }
     }
 
@@ -806,7 +977,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _logger.LogInformation("[ClaudeCli] {Tool} returned {Count} resource link(s)", step.ToolName, links.Count);
     }
 
-    private void HandleToolResultBlock(TurnState turn, JsonElement block)
+    private void HandleToolResultBlock(StepStream turn, JsonElement block)
     {
         // The matching tool_use for AskUserQuestion was suppressed from the UI;
         // drop its tool_result too so it doesn't leak in as a stray step.
@@ -814,6 +985,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (!string.IsNullOrEmpty(toolUseId) && turn.SuppressedToolUseIds.Remove(toolUseId))
             return;
 
+        if (CloseAgentStep(turn, block)) return;
         if (turn.ToolItem == null) return;
         var content = block.TryGetProperty("content", out var cp) ? ExtractToolResultText(cp) : "";
 
@@ -860,6 +1032,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
 
         FinalizeOpenBlocks(turn);
+        EndSubagents(includeBackground: false);
         turn.ResultReceived = true;
         ReadContextWindow(evt);
 
@@ -939,7 +1112,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     // ── Finalization helpers ───────────────────────────────────────────────
 
-    private void FinalizeThinkingItem(TurnState turn)
+    private void FinalizeThinkingItem(StepStream turn)
     {
         if (turn.ThinkingItem == null) return;
         var elapsed = turn.ThinkingStartTime.HasValue ? (int)(DateTime.UtcNow - turn.ThinkingStartTime.Value).TotalSeconds : 0;
@@ -951,7 +1124,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         turn.ThinkingBuilder.Clear();
     }
 
-    private void FinalizeResponseItem(TurnState turn)
+    private void FinalizeResponseItem(StepStream turn)
     {
         if (turn.ResponseItem == null) return;
         turn.ResponseItem.Status = OutputItemStatus.Success;
@@ -962,7 +1135,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         turn.ResponseBuilder.Clear();
     }
 
-    private void FinalizeToolItem(TurnState turn)
+    private void FinalizeToolItem(StepStream turn)
     {
         if (turn.ToolItem == null) return;
         if (turn.ToolItem.Status == OutputItemStatus.Pending)
@@ -974,7 +1147,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// Closes the open tool step with the given status. A step closed as an
     /// error is still the finished step, so the title reads the same way.
     /// </summary>
-    private void CompleteToolItem(TurnState turn, OutputItemStatus status)
+    private void CompleteToolItem(StepStream turn, OutputItemStatus status)
     {
         var item = turn.ToolItem;
         if (item == null) return;
@@ -987,11 +1160,20 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         turn.ToolItem = null;
     }
 
-    private void FinalizeOpenBlocks(TurnState turn)
+    private void FinalizeOpenBlocks(StepStream turn)
     {
         FinalizeThinkingItem(turn);
         FinalizeResponseItem(turn);
         FinalizeToolItem(turn);
+
+        // Agent steps whose tool_result never came: the turn was stopped.
+        foreach (var item in turn.OpenAgentSteps.Values)
+        {
+            item.Status = OutputItemStatus.Success;
+            item.Delta = null;
+            _outputListener.OnStepCompleted(item);
+        }
+        turn.OpenAgentSteps.Clear();
     }
 
     private void EmitFatalError(string body)
@@ -1364,8 +1546,13 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// <summary>
     /// Folds one assistant message's <c>usage</c> block into the session totals
     /// and the machine-wide rolling log.
+    ///
+    /// A subagent's tokens are spent like any other, so they count. Its
+    /// context is its own, though, and says nothing about how full the main
+    /// conversation is; reading it would have the meter jump to the
+    /// subagent's figure and back while a subagent runs.
     /// </summary>
-    private void AccountUsage(JsonElement message)
+    private void AccountUsage(JsonElement message, bool fromSubagent)
     {
         if (!message.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
             return;
@@ -1408,7 +1595,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             // Assigned, not accumulated: this is an occupancy reading, and it
             // drops back down when the CLI compacts the conversation.
-            _contextTokens = context;
+            if (!fromSubagent)
+                _contextTokens = context;
         }
 
         // Cache reads are charged at a fraction of a fresh input token, so
@@ -1779,10 +1967,48 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     public void Dispose() => _host.Dispose();
 
+    /// <summary>
+    /// The open steps of one conversation: the main one (a turn) or a
+    /// subagent's. Each streams thinking, text and tool calls in the same way,
+    /// one open step of each kind at a time.
+    /// </summary>
+    private class StepStream
+    {
+        public StepStream(string? parentId)
+        {
+            ParentId = parentId;
+        }
+
+        // The Agent step this conversation runs under; null for the main one.
+        // Every step the stream opens carries it.
+        public string? ParentId { get; }
+
+        // A subagent the CLI runs in the background outlives the turn.
+        public bool InBackground;
+
+        public OutputItem? ThinkingItem;
+        public StringBuilder ThinkingBuilder = new StringBuilder();
+        public DateTime? ThinkingStartTime;
+
+        public OutputItem? ResponseItem;
+        public StringBuilder ResponseBuilder = new StringBuilder();
+
+        public OutputItem? ToolItem;
+
+        // Agent steps waiting for their tool_result, by tool_use id. More
+        // than one when the model starts several subagents at once.
+        public Dictionary<string, OutputItem> OpenAgentSteps { get; } = new Dictionary<string, OutputItem>(StringComparer.Ordinal);
+
+        // tool_use ids whose tool_result should be skipped (e.g. AskUserQuestion,
+        // which we hide from the UI step list).
+        public HashSet<string> SuppressedToolUseIds { get; } = new HashSet<string>(StringComparer.Ordinal);
+    }
+
     /// <summary>State for one in-flight turn.</summary>
-    private sealed class TurnState
+    private sealed class TurnState : StepStream
     {
         public TurnState(string messageUuid, bool startedAtOnce)
+            : base(parentId: null)
         {
             MessageUuid = messageUuid;
             Started = startedAtOnce;
@@ -1796,15 +2022,6 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // CLI started itself. Events are routed to this turn only once true.
         public volatile bool Started;
 
-        public OutputItem? ThinkingItem;
-        public StringBuilder ThinkingBuilder = new StringBuilder();
-        public DateTime? ThinkingStartTime;
-
-        public OutputItem? ResponseItem;
-        public StringBuilder ResponseBuilder = new StringBuilder();
-
-        public OutputItem? ToolItem;
-
         // Set when the CLI flags an assistant message as "authentication_failed".
         public bool AuthFailed;
 
@@ -1816,10 +2033,6 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Set when the result event arrives, so a process exit right after
         // it is not reported as a second failure.
         public bool ResultReceived;
-
-        // tool_use ids whose tool_result should be skipped (e.g. AskUserQuestion,
-        // which we hide from the UI step list).
-        public HashSet<string> SuppressedToolUseIds { get; } = new HashSet<string>(StringComparer.Ordinal);
 
         // Set by Stop before the interrupt goes to the CLI, so the error
         // result that closes an interrupted turn is not shown as a failure.
