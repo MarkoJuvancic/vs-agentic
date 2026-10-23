@@ -152,9 +152,14 @@ internal static class StreamJsonProtocol
     /// Build the <c>initialize</c> request. It registers nothing: no hooks, no
     /// SDK MCP servers, no prompt changes. The point is the answer, which
     /// describes the process (see <see cref="CliProcessInfo"/>).
+    ///
+    /// <c>forwardSubagentText</c> asks for the text and thinking of subagents
+    /// as well; without it the CLI sends only their tool calls, and nothing
+    /// at all from a subagent that a subagent started. A CLI that predates the
+    /// field ignores it, which a command-line flag it does not know would not.
     /// </summary>
     public static string BuildInitialize(string requestId) =>
-        BuildControlRequest(requestId, "initialize");
+        BuildControlRequest(requestId, "initialize", w => w.WriteBoolean("forwardSubagentText", true));
 
     /// <summary>
     /// Build the <c>interrupt</c> request, which aborts the running turn.
@@ -174,9 +179,27 @@ internal static class StreamJsonProtocol
         BuildControlRequest(requestId, "cancel_async_message", w => w.WriteString("message_uuid", messageUuid));
 
     /// <summary>
+    /// Build the <c>set_model</c> request. A null model returns the session to
+    /// the account's default model, not to the <c>--model</c> the process was
+    /// started with (measured on CLI 2.1.296).
+    /// </summary>
+    public static string BuildSetModel(string requestId, string? model) =>
+        BuildControlRequest(requestId, "set_model", w => WriteStringOrNull(w, "model", model));
+
+    /// <summary>
+    /// Build the <c>get_settings</c> request. Its answer carries, under
+    /// <c>applied</c>, the model and effort the next request will use.
+    /// </summary>
+    public static string BuildGetSettings(string requestId) =>
+        BuildControlRequest(requestId, "get_settings");
+
+    /// <summary>
     /// Build the control request that changes the model and/or effort of the
     /// running process. A setting is sent only when its <c>include</c> flag is
     /// set; a null value then returns it to the CLI default.
+    ///
+    /// The model goes through <see cref="BuildSetModel"/>; this carries it only
+    /// for a CLI that does not know that request.
     /// </summary>
     public static string BuildApplyFlagSettings(
         string requestId,
@@ -187,6 +210,19 @@ internal static class StreamJsonProtocol
             w.WriteStartObject("settings");
             if (includeModel) WriteStringOrNull(w, "model", model);
             if (includeEffort) WriteStringOrNull(w, "effortLevel", effort);
+            w.WriteEndObject();
+        });
+
+    /// <summary>
+    /// Build the request that turns fast mode on or off:
+    /// <c>apply_flag_settings {fastMode}</c>. There is no request of its own
+    /// for it; the SDK's flag-settings example uses this key.
+    /// </summary>
+    public static string BuildFastMode(string requestId, bool on) =>
+        BuildControlRequest(requestId, "apply_flag_settings", w =>
+        {
+            w.WriteStartObject("settings");
+            w.WriteBoolean("fastMode", on);
             w.WriteEndObject();
         });
 

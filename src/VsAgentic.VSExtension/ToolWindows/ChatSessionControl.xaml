@@ -10,7 +10,8 @@
              xmlns:bv="clr-namespace:VsAgentic.VSExtension.ToolWindows.Banners"
              xmlns:local="clr-namespace:VsAgentic.VSExtension.ToolWindows"
              PreviewMouseWheel="OnPreviewMouseWheel"
-             PreviewKeyDown="OnPreviewKeyDown" >
+             PreviewKeyDown="OnPreviewKeyDown"
+             PreviewMouseDown="OnPreviewMouseDown" >
 
     <UserControl.Resources>
         <ResourceDictionary>
@@ -21,6 +22,17 @@
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <controls:AttachmentPreviewConverter x:Key="AttachmentPreviewConverter"/>
         <controls:MinWidthVisibilityConverter x:Key="MinWidth"/>
+
+        <!-- Flashes the status bar background while waiting for input. To-only
+             animation with AutoReverse, so the themed base colour never has to
+             be restated here: it animates from whatever the brush currently is
+             and back. Keyframes can't carry a DynamicResource anyway (a
+             Storyboard is a Freezable), and VsBrushes keys resolve to a Brush,
+             not the Color a colour keyframe needs. -->
+        <Storyboard x:Key="FlashStoryboard" RepeatBehavior="Forever" AutoReverse="True">
+            <ColorAnimation Storyboard.TargetProperty="Background.Color"
+                            To="#66808080" Duration="0:0:0.75"/>
+        </Storyboard>
 
         <!-- Status bar pickers. Fully retemplated rather than merely unbordered:
              the stock ComboBox chrome draws its own border, background and
@@ -118,6 +130,46 @@
             </Style.Triggers>
         </Style>
 
+        <!-- The Fast switch: the same flat chrome as the pickers. Checked keeps
+             the pressed fill, so "on" reads at a glance without a colour of
+             its own. -->
+        <Style x:Key="StatusToggleStyle" TargetType="ToggleButton">
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="Height" Value="19"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Foreground"
+                    Value="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Chrome"
+                                Background="Transparent"
+                                CornerRadius="3"
+                                Padding="6,0"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Background"
+                                        Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseOverBackgroundGradientKey}}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Chrome" Property="Background"
+                                        Value="{DynamicResource {x:Static vs:VsBrushes.CommandBarMouseDownBackgroundGradientKey}}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="StatusComboItemStyle" TargetType="ComboBoxItem">
             <Setter Property="Padding" Value="8,3"/>
             <Setter Property="FontSize" Value="11"/>
@@ -209,6 +261,77 @@
                             Click="RemoveAttachment_Click"/>
                 </StackPanel>
             </Border>
+        </DataTemplate>
+
+        <!-- The file open in the editor, or the lines selected in it, once the
+             user has attached it: a chip like a pasted file. The tooltip is the
+             path with the lines, which is what the message names. -->
+        <DataTemplate DataType="{x:Type svc:EditorContext}">
+            <Border Margin="0,0,6,6"
+                    BorderThickness="1"
+                    CornerRadius="3"
+                    Padding="6,3"
+                    VerticalAlignment="Top"
+                    BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
+                    ToolTip="{Binding Reference}">
+                <StackPanel Orientation="Horizontal">
+                    <imaging:CrispImage Width="14" Height="14"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0"
+                                        Moniker="{x:Static catalog:KnownMonikers.TextFile}"/>
+                    <TextBlock Text="{Binding DisplayName}"
+                               VerticalAlignment="Center"
+                               MaxWidth="260"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.WindowTextKey}}"/>
+                    <Button Content="&#xE10A;"
+                            FontFamily="Segoe MDL2 Assets"
+                            FontSize="9"
+                            Width="16" Height="16"
+                            Padding="0"
+                            Margin="6,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="Remove"
+                            Click="RemoveAttachment_Click"/>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- The same, only offered, as a button beside @ and the paperclip:
+             grey text in the status bar, so it reads as an action like theirs.
+             Nothing goes out until the user clicks it. -->
+        <DataTemplate x:Key="EditorContextSuggestionTemplate" DataType="{x:Type svc:EditorContext}">
+            <!-- Dynamic: the style is defined further down the resources. -->
+            <Button Style="{DynamicResource IconButtonStyle}"
+                    Click="AcceptEditorContext_Click">
+                <Button.ToolTip>
+                    <TextBlock>
+                        <Run Text="Attach to the next message:"/>
+                        <LineBreak/>
+                        <Run Text="{Binding Reference, Mode=OneWay}"/>
+                    </TextBlock>
+                </Button.ToolTip>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE710;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="9"
+                               VerticalAlignment="Center"
+                               Margin="0,0,4,0"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                    <!-- Only the name is shortened: the lines are what tells
+                         one suggestion from the next. -->
+                    <TextBlock Text="{Binding FileName}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               MaxWidth="180"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                    <TextBlock Text="{Binding LineRange}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                </StackPanel>
+            </Button>
         </DataTemplate>
 
         <!-- Banner DataTemplates: ContentControl below picks the right view by VM type. -->
@@ -343,7 +466,8 @@
                         AllowDrop="True"
                         PreviewDragOver="PromptBox_PreviewDragOver"
                         PreviewDragLeave="PromptBox_PreviewDragLeave"
-                        PreviewDrop="PromptBox_PreviewDrop">
+                        PreviewDrop="PromptBox_PreviewDrop"
+                        MouseEnter="PromptBox_MouseEnter">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -393,6 +517,7 @@
                                      PreviewKeyDown="InputTextBox_PreviewKeyDown"
                                      TextChanged="InputTextBox_TextChanged"
                                      SelectionChanged="InputTextBox_SelectionChanged"
+                                     GotKeyboardFocus="InputTextBox_GotKeyboardFocus"
                                      LostKeyboardFocus="InputTextBox_LostKeyboardFocus"/>
 
                             <!-- @-mention popup: anchored above the input box, holds a filtered file/folder list -->
@@ -465,6 +590,29 @@
                         <Border Grid.Row="2"
                                 BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ComboBoxBorderKey}}"
                                 BorderThickness="0,1,0,0">
+                            <!-- A local brush, not the shared VsBrushes one: the themed
+                                 brushes are frozen and can't be animated. -->
+                            <Border.Background>
+                                <SolidColorBrush Color="{DynamicResource {x:Static vs:VsColors.ComboBoxBackgroundKey}}"/>
+                            </Border.Background>
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Style.Triggers>
+                                        <!-- IsFlashing, not Activity: the view model already
+                                             folds the state and the user's Appearance switch
+                                             into one answer, so the switch logic stays in
+                                             one place as more states are added. -->
+                                        <DataTrigger Binding="{Binding IsFlashing}" Value="True">
+                                            <DataTrigger.EnterActions>
+                                                <BeginStoryboard x:Name="FlashBegin" Storyboard="{StaticResource FlashStoryboard}"/>
+                                            </DataTrigger.EnterActions>
+                                            <DataTrigger.ExitActions>
+                                                <StopStoryboard BeginStoryboardName="FlashBegin"/>
+                                            </DataTrigger.ExitActions>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -497,6 +645,15 @@
                                         <imaging:CrispImage Width="16" Height="16"
                                                             Moniker="{x:Static catalog:KnownMonikers.AddAttachment}"/>
                                     </Button>
+
+                                    <!-- The third way: the file open in the editor,
+                                         or its selection, one click away. An action
+                                         next to the other two, not a chip above the
+                                         input, so it does not read as attached. -->
+                                    <ItemsControl ItemsSource="{Binding EditorContextSuggestions}"
+                                                  ItemTemplate="{StaticResource EditorContextSuggestionTemplate}"
+                                                  VerticalAlignment="Center"
+                                                  Focusable="False"/>
                                 </StackPanel>
 
                                 <!-- Status info: usage readings and the model /
@@ -572,7 +729,6 @@
                                              closed box would draw ToString() once and
                                              keep showing "Default". -->
                                         <ComboBox Style="{StaticResource StatusComboStyle}"
-                                                  ItemContainerStyle="{StaticResource StatusComboItemStyle}"
                                                   ItemsSource="{Binding ModelOptions}"
                                                   SelectedItem="{Binding SelectedModel}"
                                                   Visibility="{Binding ActualWidth, ElementName=StatusInfo,
@@ -587,6 +743,16 @@
                                                 <TextBlock Text="{Binding ModelDisplay,
                                                            StringFormat='Model: {0}&#x0a;Takes effect on the next request, also during a reply.'}"/>
                                             </ComboBox.ToolTip>
+                                            <!-- The CLI's description of each model, on the
+                                                 row in the open list. Not on the template:
+                                                 that also draws the closed box and would
+                                                 cover the tooltip above. -->
+                                            <ComboBox.ItemContainerStyle>
+                                                <Style TargetType="ComboBoxItem"
+                                                       BasedOn="{StaticResource StatusComboItemStyle}">
+                                                    <Setter Property="ToolTip" Value="{Binding Description}"/>
+                                                </Style>
+                                            </ComboBox.ItemContainerStyle>
                                             <ComboBox.ItemTemplate>
                                                 <DataTemplate>
                                                     <TextBlock Text="{Binding DisplayName}"/>
@@ -594,14 +760,45 @@
                                             </ComboBox.ItemTemplate>
                                         </ComboBox>
 
+                                        <!-- The levels come from the selected model; a
+                                             model without effort disables the box. -->
                                         <ComboBox Style="{StaticResource StatusComboStyle}"
                                                   ItemContainerStyle="{StaticResource StatusComboItemStyle}"
                                                   ItemsSource="{Binding EffortOptions}"
-                                                  SelectedItem="{Binding SelectedEffort}"
-                                                  ToolTip="Reasoning effort. Default sends no level to the CLI.&#x0a;Takes effect on the next request, also during a reply."
+                                                  SelectedItem="{Binding SelectedEffortOption}"
+                                                  IsEnabled="{Binding HasEffort}"
+                                                  ToolTipService.ShowOnDisabled="True"
                                                   Visibility="{Binding ActualWidth, ElementName=StatusInfo,
                                                                Converter={StaticResource MinWidth},
-                                                               ConverterParameter=480}"/>
+                                                               ConverterParameter=480}">
+                                            <ComboBox.ToolTip>
+                                                <TextBlock Text="{Binding EffortTooltip}"/>
+                                            </ComboBox.ToolTip>
+                                            <ComboBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding DisplayName}"/>
+                                                </DataTemplate>
+                                            </ComboBox.ItemTemplate>
+                                        </ComboBox>
+
+                                        <!-- Only for a model the CLI offers fast mode for.
+                                             Two conditions, so two elements: the width
+                                             rule on the wrapper, the model rule on the
+                                             switch. -->
+                                        <Border Visibility="{Binding ActualWidth, ElementName=StatusInfo,
+                                                             Converter={StaticResource MinWidth},
+                                                             ConverterParameter=525}">
+                                            <ToggleButton Style="{StaticResource StatusToggleStyle}"
+                                                          Content="Fast"
+                                                          IsChecked="{Binding IsFastModeOn}"
+                                                          IsEnabled="{Binding CanToggleFastMode}"
+                                                          ToolTipService.ShowOnDisabled="True"
+                                                          Visibility="{Binding ShowFastMode, Converter={StaticResource BoolToVis}}">
+                                                <ToggleButton.ToolTip>
+                                                    <TextBlock Text="{Binding FastModeTooltip}"/>
+                                                </ToggleButton.ToolTip>
+                                            </ToggleButton>
+                                        </Border>
                                     </StackPanel>
                                 </Grid>
 
@@ -696,13 +893,24 @@
             </ItemsControl.ItemTemplate>
         </ItemsControl>
 
-        <!-- Busy indicator -->
+        <!-- Status indicator. The wording per state and the empty-means-hidden
+             rule both live on the view model's StatusText, so a new state does
+             not add a trigger here. -->
         <Border DockPanel.Dock="Bottom"
                 LayoutTransform="{StaticResource ChromeZoom}"
                 Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
-                Padding="16,4"
-                Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
-            <TextBlock Text="{Binding BusyStatus}"
+                Padding="16,4">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Visible"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding StatusText}" Value="">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <TextBlock Text="{Binding StatusText}"
                        TextTrimming="CharacterEllipsis"
                        Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"
                        FontSize="12" FontStyle="Italic"/>
