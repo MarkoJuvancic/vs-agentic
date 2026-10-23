@@ -23,12 +23,19 @@ internal static class StreamJsonProtocol
 
     /// <summary>
     /// Build the JSON line for a plain-text user message sent to the CLI over stdin.
+    ///
+    /// <paramref name="uuid"/> names the message. The CLI repeats it in the
+    /// <c>command_lifecycle</c> events for the message and in the
+    /// <c>user_message_uuids</c> of the turn's result, which is how a result is
+    /// matched to the message that started the turn. A CLI that predates the
+    /// field ignores it.
     /// </summary>
-    public static string BuildUserTextMessage(string text)
+    public static string BuildUserTextMessage(string text, string uuid)
     {
         var msg = new
         {
             type = "user",
+            uuid,
             message = new
             {
                 role = "user",
@@ -45,10 +52,12 @@ internal static class StreamJsonProtocol
     ///
     /// Images come before the text: the API reads a prompt that refers to
     /// "this screenshot" more reliably when the image is already in context.
+    /// <paramref name="uuid"/> is as in <see cref="BuildUserTextMessage"/>.
     /// </summary>
     public static string BuildUserMessageWithImages(
         string text,
-        IReadOnlyList<ChatImageAttachment> images)
+        IReadOnlyList<ChatImageAttachment> images,
+        string uuid)
     {
         var content = new List<object>(images.Count + 1);
 
@@ -75,6 +84,7 @@ internal static class StreamJsonProtocol
         var msg = new
         {
             type = "user",
+            uuid,
             message = new
             {
                 role = "user",
@@ -142,14 +152,46 @@ internal static class StreamJsonProtocol
     /// Build the <c>initialize</c> request. It registers nothing: no hooks, no
     /// SDK MCP servers, no prompt changes. The point is the answer, which
     /// describes the process (see <see cref="CliProcessInfo"/>).
+    ///
+    /// <c>forwardSubagentText</c> asks for the text and thinking of subagents
+    /// as well; without it the CLI sends only their tool calls, and nothing
+    /// at all from a subagent that a subagent started. A CLI that predates the
+    /// field ignores it, which a command-line flag it does not know would not.
     /// </summary>
     public static string BuildInitialize(string requestId) =>
-        BuildControlRequest(requestId, "initialize");
+        BuildControlRequest(requestId, "initialize", w => w.WriteBoolean("forwardSubagentText", true));
+
+    /// <summary>
+    /// Build the <c>interrupt</c> request, which aborts the running turn.
+    /// <c>cancel_queued</c> also drops the messages still waiting in the CLI's
+    /// queue, so Stop leaves nothing behind that would start on its own. A CLI
+    /// that predates the field ignores it.
+    /// </summary>
+    public static string BuildInterrupt(string requestId) =>
+        BuildControlRequest(requestId, "interrupt", w => w.WriteBoolean("cancel_queued", true));
+
+    /// <summary>
+    /// Build the <c>set_model</c> request. A null model returns the session to
+    /// the account's default model, not to the <c>--model</c> the process was
+    /// started with (measured on CLI 2.1.296).
+    /// </summary>
+    public static string BuildSetModel(string requestId, string? model) =>
+        BuildControlRequest(requestId, "set_model", w => WriteStringOrNull(w, "model", model));
+
+    /// <summary>
+    /// Build the <c>get_settings</c> request. Its answer carries, under
+    /// <c>applied</c>, the model and effort the next request will use.
+    /// </summary>
+    public static string BuildGetSettings(string requestId) =>
+        BuildControlRequest(requestId, "get_settings");
 
     /// <summary>
     /// Build the control request that changes the model and/or effort of the
     /// running process. A setting is sent only when its <c>include</c> flag is
     /// set; a null value then returns it to the CLI default.
+    ///
+    /// The model goes through <see cref="BuildSetModel"/>; this carries it only
+    /// for a CLI that does not know that request.
     /// </summary>
     public static string BuildApplyFlagSettings(
         string requestId,
@@ -170,6 +212,19 @@ internal static class StreamJsonProtocol
     /// </summary>
     public static string BuildSetPermissionMode(string requestId, string mode) =>
         BuildControlRequest(requestId, "set_permission_mode", w => w.WriteString("mode", mode));
+
+    /// <summary>
+    /// Build the request that turns fast mode on or off:
+    /// <c>apply_flag_settings {fastMode}</c>. There is no request of its own
+    /// for it; the SDK's flag-settings example uses this key.
+    /// </summary>
+    public static string BuildFastMode(string requestId, bool on) =>
+        BuildControlRequest(requestId, "apply_flag_settings", w =>
+        {
+            w.WriteStartObject("settings");
+            w.WriteBoolean("fastMode", on);
+            w.WriteEndObject();
+        });
 
     private static void WriteStringOrNull(Utf8JsonWriter w, string name, string? value)
     {

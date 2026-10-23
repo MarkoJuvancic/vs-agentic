@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -46,8 +47,18 @@ public sealed class ClaudeCliProcessHost : IDisposable
     private Task? _readerTask;
     private Task? _stderrTask;
     private PermissionPipeServer? _pipeServer;
+    private ProcessTreeJob? _processTree;
     private string? _resumeSessionId;
     private string? _mcpConfigTempPath;
+
+    // The shutdown of the previous run. A new run waits for it, because the
+    // old CLI may still be writing the conversation the new one resumes.
+    private Task _shutdown = Task.CompletedTask;
+
+    // Measured with CLI 2.1.296: an idle CLI exits about 0.7 s after stdin
+    // closes. Mid-turn, or with a background command running, it does not
+    // exit at all, so waiting longer gains nothing.
+    private const int GracefulExitTimeoutMs = 2000;
 
     private readonly object _lifecycleLock = new object();
 
@@ -80,13 +91,21 @@ public sealed class ClaudeCliProcessHost : IDisposable
         _resumeSessionId = sessionId;
     }
 
-    public Task EnsureStartedAsync(CancellationToken cancellationToken)
+    public async Task EnsureStartedAsync(CancellationToken cancellationToken)
     {
+        Task shutdown;
         lock (_lifecycleLock)
         {
-            if (IsRunning) return Task.CompletedTask;
+            if (IsRunning) return;
+            shutdown = _shutdown;
+        }
+
+        await shutdown.ConfigureAwait(false);
+
+        lock (_lifecycleLock)
+        {
+            if (IsRunning) return;
             StartLocked();
-            return Task.CompletedTask;
         }
     }
 
@@ -139,6 +158,12 @@ public sealed class ClaudeCliProcessHost : IDisposable
 
         ClaudeCliChatService.UseSubscriptionAuth(psi);
 
+        // Without this, a CLI that refuses to start (bad proxy URL, missing
+        // shell, a session held elsewhere ...) explains itself on stderr only.
+        // With it, the CLI also writes an error result with the same text and
+        // a startup_failure_reason before it exits.
+        psi.EnvironmentVariables["CLAUDE_CODE_STARTUP_FAILURE_RESULTS"] = "1";
+
         _stdinChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -151,24 +176,71 @@ public sealed class ClaudeCliProcessHost : IDisposable
         });
 
         _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        // Capture a local reference so the lambda completes THIS run's channel,
-        // not a newer one created by a subsequent StartLocked() call.
+        // Capture local references so the callbacks finish THIS run, not a
+        // newer one created by a subsequent StartLocked() call.
+        var process = _process;
         var channelForThisRun = _stdoutChannel;
-        _process.Exited += (_, __) =>
+        var stderrTail = new StderrTail();
+        var runToken = _runCts.Token;
+        Task stderrTask = Task.CompletedTask;
+        process.Exited += (_, __) =>
         {
-            _logger.LogInformation("[ClaudeCli] Process exited with code {Code}", _process?.ExitCode);
-            // Tear down the channel so any blocked reader unblocks.
-            try { channelForThisRun.Writer.TryComplete(); } catch { }
+            _logger.LogInformation("[ClaudeCli] Process exited with code {Code}", TryGetExitCode(process));
+            // The stdout reader normally completes the channel at end of
+            // stream, after the CLI's last lines. Completing it here at once
+            // could drop them, so this only covers a pipe that stays open
+            // because a grandchild inherited it.
+            _ = Task.Delay(ExitDrainTimeoutMs).ContinueWith(
+                t => CompleteRun(channelForThisRun, process, stderrTask, stderrTail, runToken),
+                TaskScheduler.Default);
         };
-        _process.Start();
+        process.Start();
 
         // Assign to a Win32 Job Object so the child is killed if the IDE
         // crashes or is force-terminated without a chance to run cleanup.
-        ChildProcessTracker.AddProcess(_process);
+        ChildProcessTracker.AddProcess(process);
+        _processTree = ProcessTreeJob.TryCreate(process);
+        if (_processTree == null)
+            _logger.LogWarning("[ClaudeCli] No job object for this run; stopping it ends the CLI but not its child processes");
 
-        _writerTask = Task.Run(() => StdinWriterLoopAsync(_runCts.Token));
-        _readerTask = Task.Run(() => StdoutReaderLoopAsync(_runCts.Token));
-        _stderrTask = Task.Run(() => StderrLoopAsync(_runCts.Token));
+        _writerTask = Task.Run(() => StdinWriterLoopAsync(runToken));
+        _stderrTask = stderrTask = Task.Run(() => StderrLoopAsync(process, stderrTail, runToken));
+        _readerTask = Task.Run(() => StdoutReaderLoopAsync(process, channelForThisRun, stderrTask, stderrTail, runToken));
+    }
+
+    // How long the end of a run waits for the process to exit and for stderr
+    // to drain before it reports the exit.
+    private const int ExitDrainTimeoutMs = 2000;
+
+    private static int? TryGetExitCode(Process process)
+    {
+        try { return process.HasExited ? process.ExitCode : null; }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Completes the event channel of one run. A run we stopped ends quietly.
+    /// A run that ended on its own ends with <see cref="CliProcessExitedException"/>,
+    /// so the chat service can explain an exit the CLI did not explain itself.
+    /// </summary>
+    private void CompleteRun(Channel<JsonElement> channel, Process process, Task stderrTask, StderrTail stderrTail, CancellationToken runToken)
+    {
+        if (runToken.IsCancellationRequested)
+        {
+            channel.Writer.TryComplete();
+            return;
+        }
+
+        int? exitCode = null;
+        try
+        {
+            if (process.WaitForExit(ExitDrainTimeoutMs)) exitCode = process.ExitCode;
+        }
+        catch { }
+        try { stderrTask.Wait(ExitDrainTimeoutMs); } catch { }
+
+        if (channel.Writer.TryComplete(new CliProcessExitedException(exitCode, stderrTail.Text)))
+            _logger.LogWarning("[ClaudeCli] CLI ended on its own (exit code {Code})", exitCode);
     }
 
     private string BuildArguments(string mcpConfigPath)
@@ -376,11 +448,11 @@ public sealed class ClaudeCliProcessHost : IDisposable
         }
     }
 
-    private async Task StdoutReaderLoopAsync(CancellationToken ct)
+    private async Task StdoutReaderLoopAsync(Process process, Channel<JsonElement> channel, Task stderrTask, StderrTail stderrTail, CancellationToken ct)
     {
         try
         {
-            var stdout = _process!.StandardOutput;
+            var stdout = process.StandardOutput;
             while (!ct.IsCancellationRequested)
             {
                 var line = await stdout.ReadLineAsync().ConfigureAwait(false);
@@ -399,7 +471,7 @@ public sealed class ClaudeCliProcessHost : IDisposable
                     continue;
                 }
 
-                await _stdoutChannel!.Writer.WriteAsync(evt, ct).ConfigureAwait(false);
+                await channel.Writer.WriteAsync(evt, ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
@@ -409,21 +481,24 @@ public sealed class ClaudeCliProcessHost : IDisposable
         }
         finally
         {
-            _stdoutChannel?.Writer.TryComplete();
+            CompleteRun(channel, process, stderrTask, stderrTail, ct);
         }
     }
 
-    private async Task StderrLoopAsync(CancellationToken ct)
+    private async Task StderrLoopAsync(Process process, StderrTail stderrTail, CancellationToken ct)
     {
         try
         {
-            var stderr = _process!.StandardError;
+            var stderr = process.StandardError;
             string? line;
             while ((line = await stderr.ReadLineAsync().ConfigureAwait(false)) != null)
             {
                 if (ct.IsCancellationRequested) return;
                 if (!string.IsNullOrWhiteSpace(line))
+                {
                     _logger.LogInformation("[ClaudeCli stderr] {Line}", line);
+                    stderrTail.Add(line);
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -444,25 +519,26 @@ public sealed class ClaudeCliProcessHost : IDisposable
     private void TearDownLocked()
     {
         try { _runCts?.Cancel(); } catch { }
-        try
+
+        // The wait for the CLI to exit happens off the caller's thread, which
+        // is often the UI thread. The next start waits for it instead.
+        var process = _process;
+        var processTree = _processTree;
+        var pipeServer = _pipeServer;
+        var mcpConfigPath = _mcpConfigTempPath;
+        if (process != null || pipeServer != null || mcpConfigPath != null)
         {
-            if (_process is { HasExited: false })
+            var previous = _shutdown;
+            _shutdown = Task.Run(async () =>
             {
-                try { _process.StandardInput.Close(); } catch { }
-                try { _process.Kill(); } catch { }
-            }
+                await previous.ConfigureAwait(false);
+                ShutDown(process, processTree, pipeServer, mcpConfigPath);
+            });
         }
-        catch { }
-        try { _process?.Dispose(); } catch { }
-        try { _pipeServer?.Dispose(); } catch { }
-        try
-        {
-            if (!string.IsNullOrEmpty(_mcpConfigTempPath) && File.Exists(_mcpConfigTempPath))
-                File.Delete(_mcpConfigTempPath);
-        }
-        catch { }
+
         _mcpConfigTempPath = null;
         _process = null;
+        _processTree = null;
         _pipeServer = null;
         _runCts = null;
         _writerTask = null;
@@ -472,7 +548,67 @@ public sealed class ClaudeCliProcessHost : IDisposable
         _stdoutChannel = null;
     }
 
+    private void ShutDown(Process? process, ProcessTreeJob? processTree, PermissionPipeServer? pipeServer, string? mcpConfigPath)
+    {
+        if (process != null)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    // End of input is the CLI's signal to finish: it writes out
+                    // what it still holds and stops its MCP servers. Killing it
+                    // at once loses that.
+                    try { process.StandardInput.Close(); } catch { }
+                    if (!process.WaitForExit(GracefulExitTimeoutMs))
+                        _logger.LogInformation("[ClaudeCli] CLI still running {Ms} ms after its input closed; ending its process tree", GracefulExitTimeoutMs);
+                }
+            }
+            catch { }
+
+            // Also after a clean exit: a background command can outlive the CLI.
+            if (processTree != null)
+                processTree.Dispose();
+            else
+                try { if (!process.HasExited) process.Kill(); } catch { }
+
+            try { process.Dispose(); } catch { }
+        }
+
+        try { pipeServer?.Dispose(); } catch { }
+        try
+        {
+            if (!string.IsNullOrEmpty(mcpConfigPath) && File.Exists(mcpConfigPath))
+                File.Delete(mcpConfigPath);
+        }
+        catch { }
+    }
+
     public void Dispose() => Stop();
+
+    /// <summary>
+    /// The last lines one run wrote to stderr. When the CLI exits without a
+    /// result event, they are the only account of why.
+    /// </summary>
+    private sealed class StderrTail
+    {
+        private const int MaxLines = 20;
+        private readonly Queue<string> _lines = new Queue<string>();
+
+        public void Add(string line)
+        {
+            lock (_lines)
+            {
+                _lines.Enqueue(line);
+                if (_lines.Count > MaxLines) _lines.Dequeue();
+            }
+        }
+
+        public string Text
+        {
+            get { lock (_lines) return string.Join("\n", _lines); }
+        }
+    }
 
     private static string EscapeArgument(string arg)
     {
