@@ -23,12 +23,19 @@ internal static class StreamJsonProtocol
 
     /// <summary>
     /// Build the JSON line for a plain-text user message sent to the CLI over stdin.
+    ///
+    /// <paramref name="uuid"/> names the message. The CLI repeats it in the
+    /// <c>command_lifecycle</c> events for the message and in the
+    /// <c>user_message_uuids</c> of the turn's result, which is how a result is
+    /// matched to the message that started the turn. A CLI that predates the
+    /// field ignores it.
     /// </summary>
-    public static string BuildUserTextMessage(string text)
+    public static string BuildUserTextMessage(string text, string uuid)
     {
         var msg = new
         {
             type = "user",
+            uuid,
             message = new
             {
                 role = "user",
@@ -45,10 +52,12 @@ internal static class StreamJsonProtocol
     ///
     /// Images come before the text: the API reads a prompt that refers to
     /// "this screenshot" more reliably when the image is already in context.
+    /// <paramref name="uuid"/> is as in <see cref="BuildUserTextMessage"/>.
     /// </summary>
     public static string BuildUserMessageWithImages(
         string text,
-        IReadOnlyList<ChatImageAttachment> images)
+        IReadOnlyList<ChatImageAttachment> images,
+        string uuid)
     {
         var content = new List<object>(images.Count + 1);
 
@@ -75,6 +84,7 @@ internal static class StreamJsonProtocol
         var msg = new
         {
             type = "user",
+            uuid,
             message = new
             {
                 role = "user",
