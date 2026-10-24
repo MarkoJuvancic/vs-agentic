@@ -165,9 +165,41 @@ internal static class StreamJsonProtocol
     /// as well; without it the CLI sends only their tool calls, and nothing
     /// at all from a subagent that a subagent started. A CLI that predates the
     /// field ignores it, which a command-line flag it does not know would not.
+    ///
+    /// <c>perTaskStopAffordance</c> tells the CLI that the user can stop each
+    /// background task on its own (the Stop button on the background tasks
+    /// strip). Without it, an interrupt also kills the background subagents,
+    /// because the CLI assumes nothing else could stop them.
     /// </summary>
     public static string BuildInitialize(string requestId) =>
-        BuildControlRequest(requestId, "initialize", w => w.WriteBoolean("forwardSubagentText", true));
+        BuildControlRequest(requestId, "initialize", w =>
+        {
+            w.WriteBoolean("forwardSubagentText", true);
+            w.WriteBoolean("perTaskStopAffordance", true);
+        });
+
+    /// <summary>
+    /// Build the <c>stop_task</c> request, which stops one background task.
+    /// The CLI then sends the task's <c>task_notification</c> with status
+    /// "stopped".
+    /// </summary>
+    public static string BuildStopTask(string requestId, string taskId) =>
+        BuildControlRequest(requestId, "stop_task", w => w.WriteString("task_id", taskId));
+
+    /// <summary>
+    /// Build the <c>background_tasks</c> request for one tool call: the
+    /// command or subagent that tool call is running in the foreground moves
+    /// to the background, and the turn goes on. Ctrl+B in the terminal.
+    /// </summary>
+    public static string BuildBackgroundTask(string requestId, string toolUseId) =>
+        BuildControlRequest(requestId, "background_tasks", w => w.WriteString("tool_use_id", toolUseId));
+
+    /// <summary>
+    /// Build the <c>get_task_output</c> request: the last 8 KiB a shell task
+    /// has written so far.
+    /// </summary>
+    public static string BuildGetTaskOutput(string requestId, string taskId) =>
+        BuildControlRequest(requestId, "get_task_output", w => w.WriteString("task_id", taskId));
 
     /// <summary>
     /// Build the <c>interrupt</c> request, which aborts the running turn.

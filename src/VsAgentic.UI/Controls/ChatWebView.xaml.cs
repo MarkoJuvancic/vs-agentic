@@ -49,6 +49,12 @@ public partial class ChatWebView : UserControl
     public event Action<int>? ZoomChangeRequested;
 
     /// <summary>
+    /// Raised when the user presses "Run in background" on a running step.
+    /// The argument is the step id.
+    /// </summary>
+    public event Action<string>? MoveToBackgroundRequested;
+
+    /// <summary>
     /// Raised when the user presses a pointer button anywhere in the rendered
     /// chat. The transcript is a browser child window, so a click in it is not
     /// a WPF mouse event and need not move WPF focus either — without this
@@ -531,6 +537,12 @@ public partial class ChatWebView : UserControl
             {
                 ZoomChangeRequested?.Invoke(root.GetProperty("step").GetInt32());
             }
+            else if (type == "moveToBackground")
+            {
+                var id = root.GetProperty("id").GetString();
+                if (!string.IsNullOrEmpty(id))
+                    MoveToBackgroundRequested?.Invoke(id!);
+            }
             else if (type == "click")
             {
                 Clicked?.Invoke();
@@ -574,6 +586,16 @@ public partial class ChatWebView : UserControl
     {
         return ExecuteOrQueueAsync(
             $"setBackgroundState({JsonSerializer.Serialize(id)}, {JsonSerializer.Serialize(state.ToString())}, {JsonSerializer.Serialize(summary)})");
+    }
+
+    /// <summary>
+    /// Offers "Run in background" on a step that is still running. The page
+    /// takes the button away when the step completes or moves.
+    /// </summary>
+    public Task SetCanMoveToBackgroundAsync(string id)
+    {
+        return ExecuteOrQueueAsync(
+            $"setCanMoveToBackground({JsonSerializer.Serialize(id)})");
     }
 
     public Task SetBodyAsync(string id, string body, OutputBodyMode bodyMode)

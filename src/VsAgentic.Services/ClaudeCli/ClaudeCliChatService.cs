@@ -368,8 +368,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 cutOff = _runningBackgroundSteps.ToArray();
                 _runningBackgroundSteps.Clear();
             }
+            lock (_tasks) { _tasks.Clear(); }
             foreach (var stepId in cutOff)
-                RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Stopped, "Ended with the Claude CLI process.");
+                RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Stopped, "Ended with the Claude CLI process.", null);
 
             EndSubagents(includeBackground: true);
 
@@ -676,6 +677,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 HandleTaskStarted(evt);
                 return;
 
+            case "task_updated":
+                HandleTaskUpdated(evt);
+                return;
+
             case "task_notification":
                 HandleTaskNotification(evt);
                 return;
@@ -692,14 +697,40 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     private readonly HashSet<string> _runningBackgroundSteps = new HashSet<string>(StringComparer.Ordinal);
 
-    public event Action<string, BackgroundStepState, string?>? StepBackgroundStateChanged;
+    // Every task the CLI announced with task_started, by task id, until its
+    // task_notification. Foreground tasks too: the CLI can move one to the
+    // background later, and says so by task id alone (task_updated).
+    private readonly Dictionary<string, CliTask> _tasks = new Dictionary<string, CliTask>(StringComparer.Ordinal);
+
+    private sealed class CliTask
+    {
+        public string? StepId;
+        public string? Type;
+        public string? Description;
+    }
+
+    public event Action<string, BackgroundStepState, string?, string?>? StepBackgroundStateChanged;
+
+    public event Action<string>? StepCanMoveToBackground;
 
     private void HandleTaskStarted(JsonElement evt)
     {
+        var taskId = CliProcessInfo.ReadString(evt, "task_id");
         var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
+        if (taskId is not null)
+        {
+            lock (_tasks)
+            {
+                _tasks[taskId] = new CliTask
+                {
+                    StepId = toolUseId,
+                    Type = CliProcessInfo.ReadString(evt, "task_type"),
+                    Description = CliProcessInfo.ReadString(evt, "description"),
+                };
+            }
+        }
         if (toolUseId is null) return;
 
-        // Foreground tasks (a subagent the turn waits on) report here too.
         var inBackground = evt.TryGetProperty("is_backgrounded", out var bg) && bg.ValueKind == JsonValueKind.True;
 
         // Whether a subagent runs in the background decides whether the end
@@ -707,13 +738,64 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (_subagents.TryGetValue(toolUseId, out var subagent))
             subagent.InBackground = inBackground;
 
-        if (!inBackground) return;
-        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Add(toolUseId); }
-        RaiseStepBackgroundStateChanged(toolUseId, BackgroundStepState.Running, null);
+        // Foreground tasks (a subagent the turn waits on, a command that has
+        // run for a few seconds) report here too. Those the turn itself
+        // started can be moved to the background; one a subagent started
+        // belongs to a step the transcript does not show.
+        if (!inBackground)
+        {
+            if (CliProcessInfo.ReadString(evt, "parent_task_id") is null)
+                RaiseStepCanMoveToBackground(toolUseId);
+            return;
+        }
+
+        MarkStepInBackground(toolUseId);
+    }
+
+    // A foreground task the user (or Ctrl+B in another client) moved to the
+    // background. Only this event says so; task_started came earlier, with
+    // is_backgrounded false.
+    private void HandleTaskUpdated(JsonElement evt)
+    {
+        if (!evt.TryGetProperty("patch", out var patch) || patch.ValueKind != JsonValueKind.Object) return;
+        if (!patch.TryGetProperty("is_backgrounded", out var bg) || bg.ValueKind != JsonValueKind.True) return;
+
+        var taskId = CliProcessInfo.ReadString(evt, "task_id");
+        string? stepId = null;
+        lock (_tasks)
+        {
+            if (taskId is not null && _tasks.TryGetValue(taskId, out var task))
+                stepId = task.StepId;
+        }
+        if (string.IsNullOrEmpty(stepId)) return;
+
+        // A subagent moved out of the turn goes on after it, like one that
+        // started in the background.
+        if (_subagents.TryGetValue(stepId!, out var subagent))
+            subagent.InBackground = true;
+
+        MarkStepInBackground(stepId!);
+    }
+
+    private void MarkStepInBackground(string stepId)
+    {
+        lock (_runningBackgroundSteps)
+        {
+            if (!_runningBackgroundSteps.Add(stepId)) return;
+        }
+        RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Running, null, null);
     }
 
     private void HandleTaskNotification(JsonElement evt)
     {
+        var taskId = CliProcessInfo.ReadString(evt, "task_id");
+        CliTask? task = null;
+        lock (_tasks)
+        {
+            if (taskId is not null && _tasks.TryGetValue(taskId, out task))
+                _tasks.Remove(taskId);
+        }
+
         var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
         if (toolUseId is null) return;
 
@@ -735,14 +817,81 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             "failed" => BackgroundStepState.Failed,
             _ => BackgroundStepState.Stopped,
         };
-        RaiseStepBackgroundStateChanged(toolUseId, state, CliProcessInfo.ReadString(evt, "summary"));
+        var summary = CliProcessInfo.ReadString(evt, "summary");
+
+        // For a task that was stopped, the CLI's summary is the task's
+        // description and nothing else, which reads as if it were still
+        // running.
+        if (state == BackgroundStepState.Stopped && summary is not null && summary == task?.Description)
+            summary = "Stopped: " + summary;
+
+        // A subagent's output file holds nothing a user would read (it was
+        // empty when measured); its steps are in the transcript.
+        var outputFile = task?.Type == "local_bash" ? CliProcessInfo.ReadString(evt, "output_file") : null;
+        if (string.IsNullOrEmpty(outputFile)) outputFile = null;
+
+        RaiseStepBackgroundStateChanged(toolUseId, state, summary, outputFile);
     }
 
-    private void RaiseStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary)
+    private void RaiseStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary, string? outputFile)
     {
         _logger.LogInformation("[ClaudeCli] Background step {Id}: {State}", stepId, state);
-        try { StepBackgroundStateChanged?.Invoke(stepId, state, summary); }
+        try { StepBackgroundStateChanged?.Invoke(stepId, state, summary, outputFile); }
         catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] StepBackgroundStateChanged handler threw"); }
+    }
+
+    private void RaiseStepCanMoveToBackground(string stepId)
+    {
+        try { StepCanMoveToBackground?.Invoke(stepId); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] StepCanMoveToBackground handler threw"); }
+    }
+
+    public async Task<bool> MoveStepToBackgroundAsync(string stepId)
+    {
+        if (!_host.IsRunning) return false;
+
+        var reply = await _control.SendAsync(id => StreamJsonProtocol.BuildBackgroundTask(id, stepId)).ConfigureAwait(false);
+        if (!reply.Succeeded)
+        {
+            _logger.LogWarning("[ClaudeCli] background_tasks failed: {Error}", reply.Error);
+            return false;
+        }
+
+        // False when the step had finished, or was in the background already.
+        var moved = reply.Response is { ValueKind: JsonValueKind.Object } body
+            && body.TryGetProperty("backgrounded", out var b) && b.ValueKind == JsonValueKind.True;
+        _logger.LogInformation("[ClaudeCli] Move step {Id} to background: {Moved}", stepId, moved);
+        return moved;
+    }
+
+    public async Task<bool> StopBackgroundTaskAsync(string taskId)
+    {
+        if (!_host.IsRunning) return false;
+
+        // The CLI answers success for any id, known or not. The task's
+        // task_notification is what says it stopped.
+        var reply = await _control.SendAsync(id => StreamJsonProtocol.BuildStopTask(id, taskId)).ConfigureAwait(false);
+        if (!reply.Succeeded)
+            _logger.LogWarning("[ClaudeCli] stop_task failed: {Error}", reply.Error);
+        else
+            _logger.LogInformation("[ClaudeCli] Stop requested for background task {Id}", taskId);
+        return reply.Succeeded;
+    }
+
+    public async Task<BackgroundTaskOutput?> GetBackgroundTaskOutputAsync(string taskId)
+    {
+        if (!_host.IsRunning) return null;
+
+        var reply = await _control.SendAsync(id => StreamJsonProtocol.BuildGetTaskOutput(id, taskId)).ConfigureAwait(false);
+        if (!reply.Succeeded || reply.Response is not { ValueKind: JsonValueKind.Object } body)
+        {
+            _logger.LogDebug("[ClaudeCli] get_task_output failed: {Error}", reply.Error ?? "empty answer");
+            return null;
+        }
+
+        var output = CliProcessInfo.ReadString(body, "output") ?? "";
+        var truncated = body.TryGetProperty("truncated", out var t) && t.ValueKind == JsonValueKind.True;
+        return new BackgroundTaskOutput(output, truncated);
     }
 
     /// <summary>
@@ -2513,6 +2662,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // Forget the running steps before the process goes, or the dispatcher
         // reports them as stopped into the transcript that was just cleared.
         lock (_runningBackgroundSteps) { _runningBackgroundSteps.Clear(); }
+        lock (_tasks) { _tasks.Clear(); }
 
         _host.Stop();
         lock (_dispatcherLock) { _dispatcherTask = null; }
