@@ -97,8 +97,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     // ── Control requests ──────────────────────────────────────────────────
     // Everything we ask the running process (initialize, a model or effort
-    // change) goes through one channel. The dispatcher hands it each
-    // control_response. Replaced on every process start.
+    // change, plan usage) goes through one channel. The dispatcher hands it
+    // each control_response. Replaced on every process start.
     private volatile CliControlChannel _control;
 
     // What the running process said about itself: its initialize answer,
@@ -106,6 +106,13 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     // cleared on every process start; the CLI repeats them with each turn.
     private volatile CliProcessInfo? _processInfo;
     private volatile CliCapabilities _capabilities = CliCapabilities.None;
+
+    // ── Plan usage ────────────────────────────────────────────────────────
+    // Asked for after each turn. One request at a time; a CLI that answers
+    // with an error does not know the request, and is not asked again.
+    private int _planUsageRequestInFlight;
+    private volatile bool _planUsageUnsupported;
+    private readonly PlanUsageStore _planUsage = PlanUsageStore.Shared;
 
     // Set when the running process could not take a change. The next message
     // then restarts it, so the change still lands — but never mid-turn.
@@ -122,6 +129,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _host = host;
         _logger = logger;
         _control = NewControlChannel();
+
+        // Another session's turn can move the plan readings; this session's
+        // meters follow. Detached in Dispose: the store outlives every session.
+        _planUsage.Changed += RaiseUsageChanged;
     }
 
     private CliControlChannel NewControlChannel() =>
@@ -529,6 +540,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             case "command_lifecycle":
                 HandleCommandLifecycle(evt);
+                return;
+
+            case "rate_limit_event":
+                if (evt.TryGetProperty("rate_limit_info", out var rateLimit))
+                    _planUsage.ApplyRateLimitEvent(rateLimit);
                 return;
         }
     }
@@ -1496,6 +1512,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     private void HandleResultEvent(JsonElement evt)
     {
+        // Before the turn check: a turn this host did not start still spent
+        // from the plan.
+        RefreshPlanUsage();
+
         // Before the turn check: the state can change during a turn (a rate
         // limit starts a cooldown), whoever the result belongs to.
         if (FastModeStatus.Read(evt) is { } fast)
@@ -2202,6 +2222,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         var (shortTotal, longTotal) = _usageLog.Totals(
             ClaudeUsagePlanDefaults.ShortWindow, ClaudeUsagePlanDefaults.LongWindow);
+        var limits = _planUsage.Read(DateTimeOffset.UtcNow);
 
         return new SessionUsage
         {
@@ -2215,6 +2236,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             LongWindowTokens = longTotal,
             ShortWindowBudget = _options.EffectiveFiveHourBudget,
             LongWindowBudget = _options.EffectiveWeeklyBudget,
+            ShortWindowLimit = limits.FiveHour,
+            LongWindowLimit = limits.SevenDay,
+            ModelLimits = limits.Models,
             CostUsd = _cumulativeCostUsd > 0 ? _cumulativeCostUsd : null,
         };
     }
@@ -2377,6 +2401,48 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private static bool IsUnknownRequest(string error) =>
         error.IndexOf("Unsupported control request subtype", StringComparison.OrdinalIgnoreCase) >= 0;
 
+    /// <summary>
+    /// Asks the running CLI for the plan rate limits, without waiting for the
+    /// answer. Called after each turn; the answer lands in
+    /// <see cref="PlanUsageStore"/>, which updates every session's meters.
+    /// </summary>
+    private void RefreshPlanUsage()
+    {
+        if (_planUsageUnsupported || !_host.IsRunning) return;
+        if (Interlocked.Exchange(ref _planUsageRequestInFlight, 1) == 1) return;
+
+        _ = RefreshPlanUsageAsync();
+    }
+
+    private async Task RefreshPlanUsageAsync()
+    {
+        try
+        {
+            EnsureDispatcherStarted();
+            var reply = await _control.SendAsync(StreamJsonProtocol.BuildGetUsage).ConfigureAwait(false);
+
+            if (reply.Succeeded)
+            {
+                if (reply.Response is { } body) _planUsage.ApplyUsageResponse(body);
+                return;
+            }
+
+            // A CLI that does not know get_usage (it is experimental in the
+            // SDK) is not asked again. Any other failure (no answer from a
+            // busy process, the process exiting) is tried after the next turn.
+            if (IsUnknownRequest(reply.Error!)) _planUsageUnsupported = true;
+            _logger.LogInformation("[ClaudeCli] Plan usage not available from the CLI: {Error}", reply.Error);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[ClaudeCli] Plan usage refresh failed");
+        }
+        finally
+        {
+            Volatile.Write(ref _planUsageRequestInFlight, 0);
+        }
+    }
+
     public void ClearHistory()
     {
         _cliSessionId = null;
@@ -2516,7 +2582,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         return false;
     }
 
-    public void Dispose() => _host.Dispose();
+    public void Dispose()
+    {
+        _planUsage.Changed -= RaiseUsageChanged;
+        _host.Dispose();
+    }
 
     /// <summary>
     /// The open steps of one conversation: the main one (a turn) or a

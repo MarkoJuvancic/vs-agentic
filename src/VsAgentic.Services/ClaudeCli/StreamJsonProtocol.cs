@@ -149,6 +149,14 @@ internal static class StreamJsonProtocol
     }
 
     /// <summary>
+    /// Build the control request that asks for the plan rate limits.
+    /// <c>skip_behaviors</c> skips a scan of the last seven days of local
+    /// transcripts that only the /usage dialog needs.
+    /// </summary>
+    public static string BuildGetUsage(string requestId) =>
+        BuildControlRequest(requestId, "get_usage", w => w.WriteBoolean("skip_behaviors", true));
+
+    /// <summary>
     /// Build the <c>initialize</c> request. It registers nothing: no hooks, no
     /// SDK MCP servers, no prompt changes. The point is the answer, which
     /// describes the process (see <see cref="CliProcessInfo"/>).
