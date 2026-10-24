@@ -186,6 +186,14 @@ internal static class StreamJsonProtocol
         BuildControlRequest(requestId, "get_settings");
 
     /// <summary>
+    /// Build the <c>get_context_usage</c> request. Its answer carries
+    /// <c>totalTokens</c>, what the conversation now takes of the context
+    /// window: what <c>/context</c> shows in the terminal.
+    /// </summary>
+    public static string BuildGetContextUsage(string requestId) =>
+        BuildControlRequest(requestId, "get_context_usage");
+
+    /// <summary>
     /// Build the control request that changes the model and/or effort of the
     /// running process. A setting is sent only when its <c>include</c> flag is
     /// set; a null value then returns it to the CLI default.

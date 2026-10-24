@@ -60,6 +60,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private long _cacheCreationTokens;
     private long _contextTokens;
 
+    // Counts the readings of _contextTokens from the main conversation, so an
+    // answer about the context that comes back late does not replace a newer
+    // reading. Under _usageLock.
+    private long _contextReadings;
+
     // The window the CLI itself applies, from the last result event. Null until
     // then, and again after the model changes; the host then estimates it.
     private long? _contextWindowTokens;
@@ -813,6 +818,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// </summary>
     private void HandleCompactBoundary(JsonElement evt)
     {
+        RefreshContextAfterCompaction();
+
         var turn = ActiveTurn();
         if (turn == null) return;
 
@@ -850,6 +857,51 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         item.Title = title;
         item.Status = OutputItemStatus.Success;
         _outputListener.OnStepCompleted(item);
+    }
+
+    /// <summary>
+    /// After a compaction the context meter would keep the size from before it
+    /// until the next reply, since the reading comes from each reply's usage.
+    /// <c>post_tokens</c> is no stand-in: it counts the summary only, not the
+    /// system prompt and tools the next request carries as well. So the CLI is
+    /// asked, as <c>/context</c> would; its total equals what the meter reads
+    /// from a reply (CLI 2.1.303).
+    ///
+    /// Not awaited: the dispatcher calling this is what delivers the answer.
+    /// </summary>
+    private void RefreshContextAfterCompaction()
+    {
+        long readings;
+        lock (_usageLock) { readings = _contextReadings; }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var reply = await _control.SendAsync(StreamJsonProtocol.BuildGetContextUsage).ConfigureAwait(false);
+                if (!reply.Succeeded || reply.Response is not { ValueKind: JsonValueKind.Object } body)
+                {
+                    _logger.LogDebug("[ClaudeCli] get_context_usage failed: {Error}", reply.Error ?? "empty answer");
+                    return;
+                }
+
+                var total = ReadLong(body, "totalTokens");
+                if (total is not > 0) return;
+
+                lock (_usageLock)
+                {
+                    // A reply that came in meanwhile has the newer figure.
+                    if (_contextReadings != readings) return;
+                    _contextTokens = total.Value;
+                }
+                _logger.LogInformation("[ClaudeCli] Context after compaction: {Tokens} tokens", total.Value);
+                RaiseUsageChanged();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[ClaudeCli] Context refresh after compaction failed");
+            }
+        });
     }
 
     // Covers a boundary that never came: the line must not spin past the turn.
@@ -2049,7 +2101,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             // Assigned, not accumulated: this is an occupancy reading, and it
             // drops back down when the CLI compacts the conversation.
             if (!fromSubagent)
+            {
                 _contextTokens = context;
+                _contextReadings++;
+            }
         }
 
         // Cache reads are charged at a fraction of a fresh input token, so
@@ -2331,6 +2386,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             _inputTokens = _outputTokens = _cacheReadTokens = _cacheCreationTokens = 0;
             _contextTokens = 0;
+            _contextReadings++;
             _contextWindowTokens = null;
             _countedMessageIds.Clear();
         }
