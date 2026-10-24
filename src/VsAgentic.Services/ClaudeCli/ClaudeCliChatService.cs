@@ -360,6 +360,17 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
             // Background tasks are children of the CLI and end with it.
             SetBackgroundTasks(Array.Empty<BackgroundTask>());
+
+            // The work ends without a notification, so mark the steps here.
+            string[] cutOff;
+            lock (_runningBackgroundSteps)
+            {
+                cutOff = _runningBackgroundSteps.ToArray();
+                _runningBackgroundSteps.Clear();
+            }
+            foreach (var stepId in cutOff)
+                RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Stopped, "Ended with the Claude CLI process.");
+
             EndSubagents(includeBackground: true);
 
             // So is any answer it still owed us. Only this process's channel:
@@ -671,25 +682,67 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
     }
 
-    // A subagent is a task as well. The CLI says here whether it runs in the
-    // background, which decides whether the end of the turn ends its steps.
+    // ── Tasks ─────────────────────────────────────────────────────────────
+    // The CLI reports the work a tool call starts with task_started and, when
+    // it ends, task_notification. Both carry the tool_use_id, which is also
+    // the step id. Two things hang on a task: a subagent's own steps, and the
+    // background mark on the step that started it. Handled without an active
+    // turn, since the notification of background work usually arrives
+    // between turns.
+
+    private readonly HashSet<string> _runningBackgroundSteps = new HashSet<string>(StringComparer.Ordinal);
+
+    public event Action<string, BackgroundStepState, string?>? StepBackgroundStateChanged;
+
     private void HandleTaskStarted(JsonElement evt)
     {
         var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
-        if (toolUseId is null || !_subagents.TryGetValue(toolUseId, out var subagent)) return;
+        if (toolUseId is null) return;
 
-        subagent.InBackground = evt.TryGetProperty("is_backgrounded", out var bg) && bg.ValueKind == JsonValueKind.True;
+        // Foreground tasks (a subagent the turn waits on) report here too.
+        var inBackground = evt.TryGetProperty("is_backgrounded", out var bg) && bg.ValueKind == JsonValueKind.True;
+
+        // Whether a subagent runs in the background decides whether the end
+        // of the turn ends its steps.
+        if (_subagents.TryGetValue(toolUseId, out var subagent))
+            subagent.InBackground = inBackground;
+
+        if (!inBackground) return;
+        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Add(toolUseId); }
+        RaiseStepBackgroundStateChanged(toolUseId, BackgroundStepState.Running, null);
     }
 
-    // The subagent is done (completed, failed or stopped). Whatever step it
-    // left open will get no further event.
     private void HandleTaskNotification(JsonElement evt)
     {
         var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
-        if (toolUseId is null || !_subagents.TryGetValue(toolUseId, out var subagent)) return;
+        if (toolUseId is null) return;
 
-        FinalizeOpenBlocks(subagent);
-        _subagents.TryRemove(toolUseId, out _);
+        // A subagent that is done (completed, failed or stopped) sends no
+        // further event for whatever step it left open.
+        if (_subagents.TryRemove(toolUseId, out var subagent))
+            FinalizeOpenBlocks(subagent);
+
+        lock (_runningBackgroundSteps)
+        {
+            // Not one we marked as running: a foreground task, or one from
+            // before the session was reopened.
+            if (!_runningBackgroundSteps.Remove(toolUseId)) return;
+        }
+
+        var state = CliProcessInfo.ReadString(evt, "status") switch
+        {
+            "completed" => BackgroundStepState.Completed,
+            "failed" => BackgroundStepState.Failed,
+            _ => BackgroundStepState.Stopped,
+        };
+        RaiseStepBackgroundStateChanged(toolUseId, state, CliProcessInfo.ReadString(evt, "summary"));
+    }
+
+    private void RaiseStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary)
+    {
+        _logger.LogInformation("[ClaudeCli] Background step {Id}: {State}", stepId, state);
+        try { StepBackgroundStateChanged?.Invoke(stepId, state, summary); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] StepBackgroundStateChanged handler threw"); }
     }
 
     /// <summary>
@@ -2456,6 +2509,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             _contextWindowTokens = null;
             _countedMessageIds.Clear();
         }
+
+        // Forget the running steps before the process goes, or the dispatcher
+        // reports them as stopped into the transcript that was just cleared.
+        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Clear(); }
 
         _host.Stop();
         lock (_dispatcherLock) { _dispatcherTask = null; }
