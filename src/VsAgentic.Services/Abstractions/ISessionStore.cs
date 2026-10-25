@@ -38,6 +38,14 @@ public interface ISessionStore
     Task SaveMessagesAsync(string folderPath, int sessionId, IReadOnlyList<PersistedMessage> messages);
     Task AppendMessageAsync(string folderPath, int sessionId, PersistedMessage message);
 
+    /// <summary>
+    /// Finds the sessions whose prompts or replies contain <paramref name="query"/>,
+    /// ignoring case. Returns at most one hit per session: the first occurrence.
+    /// Tool steps and thinking are not searched.
+    /// </summary>
+    Task<IReadOnlyList<SessionSearchHit>> SearchMessagesAsync(
+        string folderPath, string query, CancellationToken cancellationToken = default);
+
     // AI conversation history
     /// <summary>
     /// Writes an image into the session's <c>images</c> folder and returns the

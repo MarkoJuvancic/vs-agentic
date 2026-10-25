@@ -116,6 +116,13 @@ public partial class SessionInfo : ObservableObject
 
     partial void OnSessionCostChanged(decimal? value)
         => OnPropertyChanged(nameof(SessionCostDisplay));
+
+    /// <summary>
+    /// Where the current search term occurs in the conversation. Null when
+    /// there is no search, or the term occurs only in the name or nowhere.
+    /// </summary>
+    [ObservableProperty]
+    private SessionSearchHit? _searchHit;
 }
 
 public partial class SessionListViewModel : ObservableObject
@@ -152,6 +159,20 @@ public partial class SessionListViewModel : ObservableObject
     /// </summary>
     public Func<SessionInfo, bool>? ConfirmDelete { get; set; }
 
+    /// <summary>
+    /// Shortest term that is also looked up in the conversations. A single
+    /// character matches nearly every session and says nothing.
+    /// </summary>
+    private const int MinContentSearchLength = 2;
+
+    /// <summary>
+    /// Pause in typing before the conversations are searched. Every search
+    /// reads all sessions of the workspace, so one per keystroke is wasted work.
+    /// </summary>
+    private static readonly TimeSpan ContentSearchDelay = TimeSpan.FromMilliseconds(250);
+
+    private CancellationTokenSource? _contentSearchCts;
+
     public SessionListViewModel()
     {
         FilteredSessions = CollectionViewSource.GetDefaultView(Sessions);
@@ -159,7 +180,8 @@ public partial class SessionListViewModel : ObservableObject
             obj is SessionInfo s
             && s.IsArchived == ShowArchived
             && (string.IsNullOrWhiteSpace(SearchText)
-                || s.Name.IndexOf(SearchText, StringComparison.OrdinalIgnoreCase) >= 0);
+                || s.Name.IndexOf(SearchText, StringComparison.OrdinalIgnoreCase) >= 0
+                || s.SearchHit is not null);
 
         Sessions.CollectionChanged += (_, _) => OnPropertyChanged(nameof(ArchiveButtonText));
 
@@ -185,7 +207,63 @@ public partial class SessionListViewModel : ObservableObject
         }
     }
 
-    partial void OnSearchTextChanged(string value) => FilteredSessions.Refresh();
+    partial void OnSearchTextChanged(string value)
+    {
+        // The name filter applies at once. Hits from the previous term stay
+        // until the new search returns: while the user types on, the old term
+        // is part of the new one, and clearing them would make rows blink out
+        // and back.
+        FilteredSessions.Refresh();
+        _ = SearchContentAsync(value);
+    }
+
+    /// <summary>
+    /// Looks the term up in the saved conversations and marks the sessions
+    /// that contain it. A newer call cancels an older one, so only the hits
+    /// for the latest term are applied.
+    /// </summary>
+    private async Task SearchContentAsync(string text)
+    {
+        _contentSearchCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _contentSearchCts = cts;
+
+        var query = text.Trim();
+        if (query.Length < MinContentSearchLength || _sessionStore is null || _folderPath is null)
+        {
+            ApplySearchHits(Array.Empty<SessionSearchHit>());
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(ContentSearchDelay, cts.Token);
+            var hits = await _sessionStore.SearchMessagesAsync(_folderPath, query, cts.Token);
+            if (!cts.IsCancellationRequested)
+                ApplySearchHits(hits);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer term took over.
+        }
+        catch
+        {
+            // Best effort — the name filter still works without it.
+        }
+    }
+
+    private void ApplySearchHits(IReadOnlyList<SessionSearchHit> hits)
+    {
+        var byId = hits.ToDictionary(h => h.SessionId);
+        foreach (var session in Sessions)
+        {
+            session.SearchHit = session.PersistedId is int id && byId.TryGetValue(id, out var hit)
+                ? hit
+                : null;
+        }
+
+        FilteredSessions.Refresh();
+    }
 
     partial void OnShowArchivedChanged(bool value)
     {
@@ -241,6 +319,11 @@ public partial class SessionListViewModel : ObservableObject
 
             Sessions.Add(info);
         }
+
+        // A new workspace brings new sessions, which the term in the box has
+        // not been looked up in yet.
+        if (!string.IsNullOrWhiteSpace(SearchText))
+            _ = SearchContentAsync(SearchText);
     }
 
     [RelayCommand]
