@@ -12,6 +12,7 @@ using VsAgentic.UI.Controls;
 using VsAgentic.UI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Serilog;
@@ -115,6 +116,18 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             _ideContextProviders.Add(new EditorIdeContextProvider(_editorContext));
         }
 
+        try
+        {
+            if (await GetServiceAsync(typeof(SComponentModel)) is IComponentModel componentModel)
+                AddRoslynProvider(componentModel);
+        }
+        catch (Exception ex)
+        {
+            // Visual Studio without the C# and Visual Basic language services:
+            // Claude then has no symbol tools; everything else works.
+            System.Diagnostics.Debug.WriteLine($"VsAgentic: Could not add the Roslyn tools: {ex}");
+        }
+
         // Listen for solution open/close/switch events
         if (await GetServiceAsync(typeof(SVsSolution)) is IVsSolution solutionService)
         {
@@ -146,6 +159,12 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             catch (OperationCanceledException) { }
         }, cancellationToken);
     }
+
+    // A method of its own, so that a missing Roslyn assembly fails here, inside
+    // the caller's try, and not when InitializeAsync is compiled.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void AddRoslynProvider(IComponentModel componentModel)
+        => _ideContextProviders.Add(new RoslynIdeContextProvider(componentModel, _editorContext));
 
     /// <summary>
     /// Seeds the shared chat zoom from the persisted setting and writes every
