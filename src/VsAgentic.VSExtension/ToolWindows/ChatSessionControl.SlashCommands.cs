@@ -149,8 +149,10 @@ public partial class ChatSessionControl
                 return true;
             case Key.Enter:
             case Key.Tab:
-                // Ctrl+Enter still sends what is typed.
-                if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) return false;
+                // Ctrl+Enter still sends what is typed, and Shift+Enter still
+                // starts a new line (which closes the menu); Shift+Tab moves
+                // the focus back.
+                if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) != 0) return false;
                 if (SlashList.SelectedItem is not SlashCommandOption option) return false;
                 CommitSlashCommand(option);
                 return true;
