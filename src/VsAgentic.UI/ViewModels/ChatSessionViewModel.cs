@@ -4,6 +4,7 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using VsAgentic.Services.Abstractions;
+using VsAgentic.Services.ClaudeCli;
 using VsAgentic.Services.ClaudeCli.Permissions;
 using VsAgentic.Services.ClaudeCli.Questions;
 using VsAgentic.Services.Configuration;
@@ -492,6 +493,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         chatService.BackgroundTasksChanged += OnChatServiceBackgroundTasksChanged;
         chatService.StepBackgroundStateChanged += OnChatServiceStepBackgroundStateChanged;
         chatService.StepCanMoveToBackground += OnChatServiceStepCanMoveToBackground;
+        chatService.StepFileChanged += OnChatServiceStepFileChanged;
 
         InitializeUsage(chatService, options.Value);
     }
@@ -582,6 +584,46 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         if (_chatService is null) return;
         try { await _chatService.MoveStepToBackgroundAsync(stepId); }
         catch (Exception ex) { _logger.LogWarning(ex, "[VM] Could not move step {Id} to the background", stepId); }
+    }
+
+    // ── File changes ──────────────────────────────────────────────────────
+    // What Claude's Edit, MultiEdit and Write calls did to files, by step id,
+    // for the step's Diff button. Restored steps are keyed by their restore id.
+    // Touched on the UI thread only.
+    private readonly Dictionary<string, FileChange> _fileChanges = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Raised when a step gets a file change to show as a diff. The argument
+    /// is the step id.
+    /// </summary>
+    public event Action<string>? MessageFileChangeSet;
+
+    /// <summary>
+    /// Raised when the user asks to see a diff, from a step or from the
+    /// permission banner. The host opens it in its diff viewer.
+    /// </summary>
+    public event Action<FileDiffContent>? FileDiffRequested;
+
+    private void OnChatServiceStepFileChanged(string stepId, FileChange change)
+    {
+        // Saved with the step when it completes. The CLI sends a call's result
+        // before the next call starts, so the step is still open here.
+        Dispatch(() =>
+        {
+            _fileChanges[stepId] = change;
+            MessageFileChangeSet?.Invoke(stepId);
+        });
+    }
+
+    /// <summary>
+    /// Opens the diff of a step's file change. Called from the step's button
+    /// in the transcript.
+    /// </summary>
+    public void OpenStepDiff(string stepId)
+    {
+        if (!_fileChanges.TryGetValue(stepId, out var change)) return;
+        if (FileChanges.ForStep(change) is { } diff)
+            FileDiffRequested?.Invoke(diff);
     }
 
     private void AddNotice(BackgroundStepState state, string text, string? outputFile = null)
@@ -863,9 +905,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     }
                 }
 
+                var restoreId = $"restore-{msgIndex++}";
+                if (msg.FileChange is { } fileChange)
+                    _fileChanges[restoreId] = fileChange;
+
                 restoreData.Add(new ChatMessageData
                 {
-                    Id = $"restore-{msgIndex++}",
+                    Id = restoreId,
+                    HasFileChange = msg.FileChange is not null,
                     Type = type.ToString(),
                     Content = msg.Content,
                     ToolName = msg.ToolName,
@@ -1177,6 +1224,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         _chatService?.ClearHistory();
         Items.Clear();
         _activeItems.Clear();
+        _fileChanges.Clear();
         AllCleared?.Invoke();
     }
 
@@ -1336,6 +1384,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                     StatusText = vm.Status.ToString(),
                     StepId = item.Id,
                     ParentId = item.ParentId,
+                    FileChange = _fileChanges.TryGetValue(item.Id, out var fileChange) ? fileChange : null,
                     CreatedUtc = DateTime.UtcNow
                 });
             }
@@ -1480,6 +1529,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 _chatService.BackgroundTasksChanged -= OnChatServiceBackgroundTasksChanged;
                 _chatService.StepBackgroundStateChanged -= OnChatServiceStepBackgroundStateChanged;
                 _chatService.StepCanMoveToBackground -= OnChatServiceStepCanMoveToBackground;
+                _chatService.StepFileChanged -= OnChatServiceStepFileChanged;
             }
             // Static: without this, a closed session stays reachable from the catalog.
             ClaudeModelCatalog.ReportedChanged -= OnReportedModelsChanged;
