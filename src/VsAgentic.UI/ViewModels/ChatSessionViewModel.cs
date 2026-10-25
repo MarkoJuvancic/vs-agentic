@@ -709,6 +709,9 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     private void OnPermissionBrokerRequested(PermissionRequest request)
     {
+        // Read here, off the UI thread: the file can be large.
+        var diff = ProposedFileDiff(request);
+
         Dispatch(() =>
         {
             try
@@ -720,7 +723,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 {
                     Dispatch(() => ActiveBanner = null);
                     _permissionBroker?.Resolve(request.Id, decision);
-                });
+                }, diff, d => FileDiffRequested?.Invoke(d));
             }
             catch (Exception ex)
             {
@@ -732,6 +735,25 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 catch (Exception ex2) { _logger.LogError(ex2, "[VM] PermissionBroker.Resolve also failed"); }
             }
         });
+    }
+
+    /// <summary>
+    /// The change a file edit waiting for permission would make, or null when
+    /// it is not a file edit or would not apply.
+    /// </summary>
+    private FileDiffContent? ProposedFileDiff(PermissionRequest request)
+    {
+        try
+        {
+            return FileChanges.ForPermission(request.ToolName, request.Input,
+                path => System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null);
+        }
+        catch (Exception ex)
+        {
+            // The banner still works without the diff.
+            _logger.LogWarning(ex, "[VM] Could not prepare the diff for {Tool}", request.ToolName);
+            return null;
+        }
     }
 
     private void OnQuestionBrokerRequested(UserQuestionRequest request)
