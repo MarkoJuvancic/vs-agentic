@@ -18,6 +18,10 @@ public partial class ChatSessionControl
     // menu straight back. Cleared once the input no longer starts with "/".
     private bool _slashDismissed;
 
+    // The text the "/" button found in the input, while the "/ " it put in
+    // front is still there and nothing has been picked. Escape puts it back.
+    private string? _textBeforeSlashButton;
+
     private void SlashCommandButton_Click(object sender, RoutedEventArgs e)
     {
         InputTextBox.Focus();
@@ -25,16 +29,12 @@ public partial class ChatSessionControl
 
         if (!text.StartsWith("/", StringComparison.Ordinal))
         {
-            _suppressTextChanged = true;
-            try
-            {
-                InputTextBox.Text = "/" + text;
-                InputTextBox.CaretIndex = 1;
-            }
-            finally
-            {
-                _suppressTextChanged = false;
-            }
+            // "/ " in front, so the text already typed stays whole and becomes
+            // the command's argument once one is picked. A bare "/" would join
+            // its first word to the command's name.
+            var prefix = text.Length == 0 ? "/" : "/ ";
+            SetInputText(prefix + text, 1);
+            _textBeforeSlashButton = text.Length == 0 ? null : text;
         }
         else
         {
@@ -43,6 +43,20 @@ public partial class ChatSessionControl
 
         _slashDismissed = false;
         UpdateSlashPopup();
+    }
+
+    // Escape after the "/" button, with no command picked: the input goes back
+    // to what the user had written, so it is not sent as "/ text".
+    private void RestoreTextBeforeSlashButton()
+    {
+        var before = _textBeforeSlashButton;
+        _textBeforeSlashButton = null;
+        if (before is null) return;
+
+        // Typing after the slash makes it a command name the user wrote.
+        var text = InputTextBox.Text ?? "";
+        if (text != "/ " + before) return;
+        SetInputText(before, before.Length);
     }
 
     /// <summary>Opens, refilters or closes the menu for the input as it now stands.</summary>
@@ -143,6 +157,7 @@ public partial class ChatSessionControl
             case Key.Escape:
                 _slashDismissed = true;
                 CloseSlashPopup();
+                RestoreTextBeforeSlashButton();
                 return true;
         }
         return false;
@@ -181,21 +196,35 @@ public partial class ChatSessionControl
     /// </summary>
     private void CommitSlashCommand(SlashCommandOption option)
     {
+        _textBeforeSlashButton = null;
         var text = InputTextBox.Text ?? "";
         var end = SlashTokenEnd(text);
-        var rest = text.Substring(end).TrimStart();
+        // Spaces on the command's own line only: a line break after it starts
+        // the text the user wrote below, and stays.
+        var rest = text.Substring(end).TrimStart(' ', '\t');
 
         if (option.OpensModelPanel && ModelPickerToggle.IsVisible)
         {
-            SetInputText(rest, 0);
+            SetInputText(rest.TrimStart('\r', '\n'), 0);
             CloseSlashPopup();
-            ModelPickerToggle.IsChecked = true;
+            OpenModelPanel();
             return;
         }
 
-        var command = "/" + option.Name + " ";
+        // No space before a line break: the text below stays where it was.
+        var command = "/" + option.Name;
+        if (!rest.StartsWith("\r", StringComparison.Ordinal) && !rest.StartsWith("\n", StringComparison.Ordinal))
+            command += " ";
         SetInputText(command + rest, command.Length);
         CloseSlashPopup();
+    }
+
+    /// <summary>Opens the model panel. False while its button is hidden.</summary>
+    private bool OpenModelPanel()
+    {
+        if (!ModelPickerToggle.IsVisible) return false;
+        ModelPickerToggle.IsChecked = true;
+        return true;
     }
 
     private void SetInputText(string text, int caret)

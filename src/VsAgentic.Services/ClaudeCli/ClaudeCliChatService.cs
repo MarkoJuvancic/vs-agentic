@@ -1375,31 +1375,29 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         PublishCommands();
     }
 
+    // Built and handed on under the lock: the initialize answer and
+    // system/init arrive on different threads, and a list built from the
+    // older of the two must not land after the newer one.
     private void PublishCommands()
     {
-        IReadOnlyList<CliCommandInfo> commands;
-        IReadOnlyList<string>? slashNames;
-        HashSet<string> terminalOnly;
         lock (_commandsLock)
         {
-            commands = _commands;
-            slashNames = _slashCommandNames;
-            terminalOnly = new HashSet<string>(_terminalCommandNames, StringComparer.OrdinalIgnoreCase);
-        }
-        if (commands.Count == 0) return;
+            if (_commands.Count == 0) return;
 
-        var menu = new List<ClaudeCommandInfo>();
-        foreach (var command in commands)
-        {
-            var name = TypedName(command.Name, slashNames);
-            // Internal commands the CLI runs for itself ("__remote-workflow").
-            if (name.StartsWith("__", StringComparison.Ordinal)) continue;
-            if (terminalOnly.Contains(name) || terminalOnly.Contains(command.Name)) continue;
-            menu.Add(new ClaudeCommandInfo(name, command.Description, command.ArgumentHint, command.Builtin));
-        }
+            var terminalOnly = new HashSet<string>(_terminalCommandNames, StringComparer.OrdinalIgnoreCase);
+            var menu = new List<ClaudeCommandInfo>();
+            foreach (var command in _commands)
+            {
+                var name = TypedName(command.Name, _slashCommandNames);
+                // Internal commands the CLI runs for itself ("__remote-workflow").
+                if (name.StartsWith("__", StringComparison.Ordinal)) continue;
+                if (terminalOnly.Contains(name) || terminalOnly.Contains(command.Name)) continue;
+                menu.Add(new ClaudeCommandInfo(name, command.Description, command.ArgumentHint, command.Builtin));
+            }
 
-        try { ClaudeCommandCatalog.SetReported(menu); }
-        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] Command list handler threw"); }
+            try { ClaudeCommandCatalog.SetReported(_options.WorkingDirectory, menu); }
+            catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] Command list handler threw"); }
+        }
     }
 
     /// <summary>

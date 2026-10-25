@@ -969,6 +969,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     private async Task SendAsync()
     {
         var message = InputText.Trim();
+
+        // "/model", "/effort" and "/fast" change the panel, not go to the CLI.
+        if (PendingAttachments.Count == 0 && TryRunPanelCommand(message))
+        {
+            InputText = "";
+            return;
+        }
+
         InputText = "";
 
         var images = PendingAttachments.OfType<ChatImageAttachment>().ToList();

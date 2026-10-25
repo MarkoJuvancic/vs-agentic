@@ -115,6 +115,9 @@ public partial class ChatSessionControl : UserControl
     {
         DataContext = viewModel;
 
+        // "/model", "/effort" and "/fast", picked or typed, open the panel.
+        viewModel.OpenModelPanel = OpenModelPanel;
+
         viewModel.MessageAdded += (id, type, data) =>
             _ = ChatWebView.AddMessageAsync(id, type, data);
 

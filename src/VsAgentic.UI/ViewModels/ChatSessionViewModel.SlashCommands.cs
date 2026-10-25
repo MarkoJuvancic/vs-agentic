@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using VsAgentic.Services.Configuration;
 
 namespace VsAgentic.UI.ViewModels;
@@ -54,27 +55,89 @@ public partial class ChatSessionViewModel
 
     /// <summary>
     /// Every command the CLI reported, Claude Code's own first. Empty until a
-    /// CLI has answered, in this session or another.
+    /// CLI has answered, in this session or another one in the same folder.
     /// </summary>
     public IReadOnlyList<SlashCommandOption> SlashCommands => _slashCommands;
 
     private void InitializeSlashCommands()
     {
         ClaudeCommandCatalog.ReportedChanged += OnReportedCommandsChanged;
-        RebuildSlashCommands(ClaudeCommandCatalog.Reported);
+        RebuildSlashCommands();
     }
 
-    private void OnReportedCommandsChanged(IReadOnlyList<ClaudeCommandInfo> commands) =>
-        Dispatch(() => RebuildSlashCommands(commands));
-
-    private void RebuildSlashCommands(IReadOnlyList<ClaudeCommandInfo>? commands)
+    // Another folder's list holds that project's skills, not ours.
+    private void OnReportedCommandsChanged(string workingDirectory)
     {
+        if (ClaudeCommandCatalog.SameDirectory(workingDirectory, WorkingDirectory))
+            Dispatch(RebuildSlashCommands);
+    }
+
+    private void RebuildSlashCommands()
+    {
+        // Read here, not taken from the event: of two reports that race, the
+        // catalog holds the one that came last.
+        var commands = ClaudeCommandCatalog.Reported(WorkingDirectory);
+
         // Stable sort: within each group the CLI's own order stays.
         _slashCommands = (commands ?? Array.Empty<ClaudeCommandInfo>())
             .Select(c => new SlashCommandOption(c))
             .OrderBy(c => c.Group == SlashCommandOption.CommandsGroup ? 0 : 1)
             .ToList();
         OnPropertyChanged(nameof(SlashCommands));
+    }
+
+    // ── /model, /effort and /fast typed in full ───────────────────────────
+    // Sent to the CLI, they would switch it behind the panel's back. They go
+    // through the panel's own state instead, as a pick in the panel does.
+
+    private static readonly Regex PanelCommandRe = new Regex(
+        @"^/(model|effort|fast)(?:\s+(\S+))?\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Opens the model panel; false when the view cannot show it (its button
+    /// is hidden in a narrow window). Set by the view.
+    /// </summary>
+    public Func<bool>? OpenModelPanel { get; set; }
+
+    /// <summary>
+    /// Handles a message that is only "/model", "/effort" or "/fast", with or
+    /// without one argument. Without one the panel opens. "/model opus",
+    /// "/effort high" and "/fast on" set the panel, which tells the CLI. False
+    /// when the message is something else or the argument is not one the panel
+    /// knows; the message then goes to the CLI as before.
+    /// </summary>
+    private bool TryRunPanelCommand(string message)
+    {
+        var match = PanelCommandRe.Match(message);
+        if (!match.Success) return false;
+
+        var arg = match.Groups[2].Success ? match.Groups[2].Value : null;
+        if (arg is null) return OpenModelPanel?.Invoke() == true;
+
+        switch (match.Groups[1].Value.ToLowerInvariant())
+        {
+            case "model":
+                // The panel's Default row has no alias; the CLI calls it "default".
+                SelectedModel = OptionFor(string.Equals(arg, "default", StringComparison.OrdinalIgnoreCase) ? "" : arg);
+                return true;
+
+            case "effort":
+                if (char.IsDigit(arg[0]) || !Enum.TryParse<ClaudeEffort>(arg, ignoreCase: true, out var effort)
+                    || !Enum.IsDefined(typeof(ClaudeEffort), effort))
+                    return false;
+                SelectedEffort = effort;
+                return true;
+
+            case "fast":
+                bool on;
+                if (arg.Equals("on", StringComparison.OrdinalIgnoreCase)) on = true;
+                else if (arg.Equals("off", StringComparison.OrdinalIgnoreCase)) on = false;
+                else return false;
+                if (!CanToggleFastMode || (on && SelectedModel?.SupportsFastMode != true)) return false;
+                IsFastModeOn = on;
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
