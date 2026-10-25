@@ -606,12 +606,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
 
     private void OnChatServiceStepFileChanged(string stepId, FileChange change)
     {
-        // Saved with the step when it completes. The CLI sends a call's result
-        // before the next call starts, so the step is still open here.
         Dispatch(() =>
         {
             _fileChanges[stepId] = change;
             MessageFileChangeSet?.Invoke(stepId);
+
+            // A step still open saves the change when it completes. One that
+            // is closed was saved without it: when Claude makes several calls
+            // in one message and the first waits for permission, the CLI
+            // starts them all, and each closes the step before it.
+            if (!_activeItems.ContainsKey(stepId))
+                PersistStepFileChangeFireAndForget(stepId, change);
         });
     }
 
@@ -1453,11 +1458,34 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         var sessionId = ActiveSessionId;
         if (store is null || folder is null || !sessionId.HasValue) return;
 
-        _ = Task.Run(async () =>
+        EnqueueMessageWrite(() => store.AppendMessageAsync(folder, sessionId.Value, message));
+    }
+
+    private void PersistStepFileChangeFireAndForget(string stepId, FileChange change)
+    {
+        var store = ActiveStore;
+        var folder = ActiveFolder;
+        var sessionId = ActiveSessionId;
+        if (store is null || folder is null || !sessionId.HasValue) return;
+
+        EnqueueMessageWrite(() => store.SetStepFileChangeAsync(folder, sessionId.Value, stepId, change));
+    }
+
+    // Writes to messages.json run one after another, in the order they were
+    // asked for: a file change for a closed step has to find the step saved.
+    private readonly object _messageWriteLock = new();
+    private Task _messageWriteTail = Task.CompletedTask;
+
+    private void EnqueueMessageWrite(Func<Task> write)
+    {
+        lock (_messageWriteLock)
         {
-            try { await store.AppendMessageAsync(folder, sessionId.Value, message); }
-            catch { /* best effort */ }
-        });
+            _messageWriteTail = _messageWriteTail.ContinueWith(async _ =>
+            {
+                try { await write(); }
+                catch { /* best effort */ }
+            }, TaskScheduler.Default).Unwrap();
+        }
     }
 
     private void PersistConversationHistoryFireAndForget()

@@ -185,10 +185,11 @@ public interface IChatService
 
     /// <summary>
     /// Raised when an Edit, MultiEdit or Write call has changed a file.
-    /// Arguments: the step id and the change. Comes while the step is still
-    /// open: the CLI sends a call's result before the next call starts, also
-    /// for calls made in parallel. Raised on a background thread; hosts must
-    /// marshal to the UI thread.
+    /// Arguments: the step id and the change. Comes after the step started,
+    /// and can come after it completed: when one of several calls in a
+    /// message waits for permission, the CLI starts the next ones first, and
+    /// each closes the step before it. Raised on a background thread; hosts
+    /// must marshal to the UI thread.
     /// </summary>
     event Action<string, FileChange>? StepFileChanged;
 

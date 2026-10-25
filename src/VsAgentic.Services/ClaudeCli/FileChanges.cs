@@ -24,6 +24,8 @@ public static class FileChanges
     public const string AfterLabel = "After";
     public const string CurrentLabel = "Current";
     public const string ProposedLabel = "Proposed";
+    public const string NoFileLabel = "No file";
+    public const string CreatedLabel = "Created";
 
     /// <summary>
     /// Reads <c>tool_use_result</c> of an Edit, MultiEdit or Write call. Null
@@ -77,8 +79,8 @@ public static class FileChanges
                 FilePath = change.FilePath,
                 Before = change.Before,
                 After = change.After,
-                BeforeLabel = BeforeLabel,
-                AfterLabel = AfterLabel,
+                BeforeLabel = change.IsNewFile ? NoFileLabel : BeforeLabel,
+                AfterLabel = change.IsNewFile ? CreatedLabel : AfterLabel,
             };
         }
 
@@ -111,8 +113,8 @@ public static class FileChanges
             FilePath = change.FilePath,
             Before = before.ToString(),
             After = after.ToString(),
-            BeforeLabel = BeforeLabel,
-            AfterLabel = AfterLabel,
+            BeforeLabel = change.IsNewFile ? NoFileLabel : BeforeLabel,
+            AfterLabel = change.IsNewFile ? CreatedLabel : AfterLabel,
             ChangedPartsOnly = true,
         };
     }
@@ -172,7 +174,7 @@ public static class FileChanges
                 FilePath = filePath!,
                 Before = before,
                 After = after,
-                BeforeLabel = CurrentLabel,
+                BeforeLabel = current is null ? NoFileLabel : CurrentLabel,
                 AfterLabel = ProposedLabel,
             };
         }
