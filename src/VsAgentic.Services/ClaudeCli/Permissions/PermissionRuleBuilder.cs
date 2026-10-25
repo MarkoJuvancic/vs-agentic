@@ -226,6 +226,13 @@ public static class PermissionRuleBuilder
             // rule of its own.
             if (c == '<' && next == '<') return null;
 
+            // PowerShell's own forms of the same: a here-string (@"…"@, @'…'@)
+            // runs over lines, and a block comment (<# … #>) hides what is
+            // between its marks. Read as code, both gave rules for commands
+            // that never run.
+            if (!posix && c == '@' && (next == '"' || next == '\'')) return null;
+            if (!posix && c == '<' && next == '#') return null;
+
             if (c == '#' && wordStart)
             {
                 // The rest of the line is a comment: ls # ; rm -rf x runs ls and
@@ -336,38 +343,47 @@ public static class PermissionRuleBuilder
         else if (IsCommandName(head)) name = ExecutableLeaf(head);
         else return null;
 
+        // The CLI checks each command of a pipe on its own, so a rule for a
+        // command fed by a pipe also covers it fed by anything else later:
+        // Remove-Item approved after Get-ChildItem x | Remove-Item would also
+        // take Get-ChildItem -Recurse C:\src | Remove-Item, and git apply
+        // after cat a.patch | git apply any other patch. Only commands that
+        // read their input and write nothing but their output get a rule there.
+        if (piped && !ReadOnlyCommands.Contains(name) && !PipeFilters.Contains(name)) return null;
+        if (PipeFilters.Contains(name)) return ExactRule(segment);
+
         if (RunsOtherCode(name, words))
         {
             // Such a program runs whatever its arguments or its input say. A
             // rule for the exact command is the most it can get, and not even
             // that when the code comes from its input: Bash(sh) approved after
-            // curl … | sh would also cover a later cat evil.sh | sh, because
-            // the CLI checks each command of a pipe on its own.
-            if (piped || ReadsCodeFromInput(words)) return null;
+            // curl … | sh would also cover a later cat evil.sh | sh.
+            if (ReadsCodeFromInput(words)) return null;
             return ExactRule(segment);
         }
-
-        // A program named by full path is specific on its own, so no subcommand
-        // is collected. The quotes stay in the rule, because the CLI compares
-        // against the command as written.
-        if (quoted is not null)
-            return WritesByPath.Contains(name) ? ExactRule(segment) : quoted + ":*";
 
         // Read-only commands take no subcommand: cd src would otherwise yield
         // Bash(cd src:*), which never matches the next cd. The list is held to
         // commands that only read, so the widest thing a rule from it can allow
-        // is a read.
-        if (ReadOnlyCommands.Contains(name)) return head + ":*";
+        // is a read. Not for a program named by its path: that path is part of
+        // what the user was shown.
+        if (quoted is null && ReadOnlyCommands.Contains(name))
+            return head + ":*";
 
-        if (WritesByPath.Contains(name)) return ExactRule(segment);
-
-        // git log --oneline -5 keys on "git log". One subcommand, not two: two
-        // looks right on gh issue list but misreads git ls-tree main, where the
-        // second word is a branch name and the rule would only ever match that
-        // branch. A flag, a path or a quoted string in this position is an
-        // operand, and generalising over it is what turned git -C . status into
-        // Bash(git:*).
-        if (words.Count >= 2 && IsPlainWord(words[1]))
+        // git log --oneline -5 keys on "git log". Only for a tool known to take
+        // a subcommand there, and only for a subcommand that does one thing of
+        // its own: the second word of any other program, or of git submodule,
+        // can be a program to run, a file to write or a branch name.
+        //
+        // One subcommand, not two: two looks right on gh issue list but
+        // misreads git ls-tree main, where the second word is a branch name and
+        // the rule would only ever match that branch. A flag, a path or a
+        // quoted string in this position is an operand, and generalising over
+        // it is what turned git -C . status into Bash(git:*). The quotes of a
+        // program named by its path stay in the rule, because the CLI compares
+        // against the command as written.
+        if (SubcommandTools.Contains(name) && words.Count >= 2 && IsPlainWord(words[1])
+            && !OpenSubcommands.Contains(name + " " + words[1]))
             return head + " " + words[1] + ":*";
 
         // Nothing here can be generalised from, so the rule is the command as
@@ -606,7 +622,7 @@ public static class PermissionRuleBuilder
 
         // Interpreters
         "python", "python2", "python3", "py", "node", "nodejs", "deno", "bun",
-        "perl", "ruby", "php", "osascript",
+        "perl", "ruby", "php", "osascript", "lua", "tclsh", "Rscript", "irb", "sqlite3",
 
         // PowerShell's eval, which reads the pipe as well as its argument
         "Invoke-Expression", "iex",
@@ -620,6 +636,8 @@ public static class PermissionRuleBuilder
     {
         "env", "xargs", "sudo", "doas", "su", "timeout", "nohup", "time", "nice",
         "stdbuf", "watch", "start", "ssh", "eval", "exec", "source", "command",
+        "builtin", "busybox", "setsid", "flock", "winpty", "chroot", "unshare",
+        "nsenter", "taskset", "ionice", "runuser", "pkexec", "script", "parallel",
 
         // The same in PowerShell
         "Start-Process", "saps", "Invoke-Command", "icm", "Start-Job",
@@ -636,27 +654,58 @@ public static class PermissionRuleBuilder
     private static readonly HashSet<string> RunnerSubcommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "npm exec", "npm x", "pnpm exec", "pnpm dlx", "yarn exec", "yarn dlx",
-        "uv run", "uv tool", "dotnet exec", "docker run", "docker exec",
-        "podman run", "podman exec", "go run",
+        "uv run", "uv tool", "dotnet exec", "dotnet dnx", "dotnet tool",
+        "docker run", "docker exec", "docker compose", "podman run", "podman exec",
+        "go run", "poetry run", "pipenv run", "conda run", "bundle exec",
+        "kubectl exec", "git submodule",
     };
 
     /// <summary>
-    /// Commands that write or delete and take a path where another command takes
-    /// a subcommand. A prefix rule would reach past that one path: approving
-    /// <c>rm old</c> would also allow <c>rm older-and-still-needed</c>. find,
-    /// sed and awk are here because they can run a command of their own over
-    /// what they find, and tree because <c>tree -o file</c> writes a file
-    /// without a redirection.
+    /// Tools whose second word is a subcommand, and the only ones that get a
+    /// rule for it (<c>git log:*</c>). Any other program gets the command as
+    /// written: its second word can be a path to delete (<c>rm old</c>), a
+    /// file to write (<c>tee log</c>) or a program to run (<c>poetry run</c>,
+    /// <c>busybox sh</c>), and no list of such programs is ever complete.
     /// </summary>
-    private static readonly HashSet<string> WritesByPath = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> SubcommandTools = new(StringComparer.OrdinalIgnoreCase)
     {
-        "rm", "rmdir", "mv", "cp", "chmod", "chown", "touch", "mkdir",
-        "find", "sed", "awk", "tree",
+        "git", "dotnet", "npm", "pnpm", "yarn", "cargo", "go", "docker", "kubectl",
+    };
 
-        // The same in PowerShell and cmd, with the aliases PowerShell defines
-        "Remove-Item", "ri", "del", "erase", "rd", "Move-Item", "mi", "move",
-        "Copy-Item", "cpi", "copy", "Rename-Item", "rni", "ren", "New-Item", "ni",
-        "md", "Set-Content", "Add-Content", "Clear-Content", "Out-File",
+    /// <summary>
+    /// Subcommands of <see cref="SubcommandTools"/> that run code they are
+    /// handed, start a program, or change what later commands of the tool run.
+    /// They get the command as written. <see cref="RunnerSubcommands"/> holds
+    /// the ones that also count as runners.
+    /// </summary>
+    private static readonly HashSet<string> OpenSubcommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // foreach runs a command in each submodule; config can set an alias,
+        // a pager or a hook path that a later git log then runs; rebase --exec,
+        // bisect run, filter-branch and the diff and merge tools run commands.
+        "git submodule", "git config", "git rebase", "git bisect", "git filter-branch",
+        "git difftool", "git mergetool", "git daemon",
+
+        "dotnet dnx", "dotnet tool", "dotnet exec",
+        "npm exec", "npm x", "npm init", "npm create",
+        "pnpm exec", "pnpm dlx", "pnpm create", "yarn exec", "yarn dlx", "yarn create",
+        "go run", "go generate",
+        "docker run", "docker exec", "docker compose", "docker cp",
+        "kubectl exec", "kubectl run", "kubectl cp", "kubectl debug", "kubectl attach", "kubectl plugin",
+    };
+
+    /// <summary>
+    /// Programs that read their input and write only their output, so a rule
+    /// for one fed by a pipe allows no more than filtering. They get the
+    /// command as written, not a prefix: sort -o and uniq with a second file
+    /// write a file.
+    /// </summary>
+    private static readonly HashSet<string> PipeFilters = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sort", "uniq", "cut", "tr", "nl", "column", "jq", "findstr",
+        "Select-Object", "select", "Select-String", "sls", "Sort-Object",
+        "Measure-Object", "measure", "Group-Object", "Format-Table", "ft",
+        "Format-List", "fl", "Out-String", "ConvertFrom-Json", "ConvertTo-Json",
     };
 
     /// <summary>
