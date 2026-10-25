@@ -176,6 +176,71 @@ public interface IChatService
     void LaunchLogin();
 
     /// <summary>
+    /// Raised when the CLI starts a turn without a <see cref="SendMessageAsync"/>
+    /// call, for example when a background command finishes and wakes the
+    /// model. The turn's output arrives through the output listener as usual,
+    /// also while a sent message waits in the CLI's queue behind the turn.
+    /// Raised on a background thread; hosts must marshal to the UI thread.
+    /// </summary>
+    event Action? UnsolicitedTurnStarted;
+
+    /// <summary>
+    /// Raised when a turn announced by <see cref="UnsolicitedTurnStarted"/>
+    /// ends, is stopped, or is cut off by the process exiting. Also raised
+    /// when the CLI takes a queued message into the turn: from then on the
+    /// turn's output belongs to that message. Raised on a background thread.
+    /// </summary>
+    event Action? UnsolicitedTurnCompleted;
+
+    /// <summary>
+    /// Stops the turn the CLI started on its own. Like stopping a
+    /// <see cref="SendMessageAsync"/> call, this interrupts the turn in the
+    /// CLI; <see cref="UnsolicitedTurnCompleted"/> follows when the CLI has
+    /// closed it. Returns at once. A no-op when no such turn is running.
+    /// </summary>
+    void StopUnsolicitedTurn();
+
+    /// <summary>
+    /// Raised when the work a tool step moved to the background starts or
+    /// ends. Arguments: the step id (the same id the output listener used for
+    /// the step), the new state, the CLI's summary when the work ended,
+    /// e.g. <c>Background command "…" failed with exit code 3</c>, and the
+    /// file the CLI wrote a shell command's output to (null for other work).
+    /// Can fire between turns. Raised on a background thread; hosts must
+    /// marshal to the UI thread.
+    /// </summary>
+    event Action<string, BackgroundStepState, string?, string?>? StepBackgroundStateChanged;
+
+    /// <summary>
+    /// Raised when a step's command or subagent, still running in the
+    /// foreground, can be moved to the background with
+    /// <see cref="MoveStepToBackgroundAsync"/>. The CLI reports this a few
+    /// seconds after the tool call starts. The argument is the step id.
+    /// Raised on a background thread; hosts must marshal to the UI thread.
+    /// </summary>
+    event Action<string>? StepCanMoveToBackground;
+
+    /// <summary>
+    /// Moves the command or subagent of a running step to the background. The
+    /// tool call returns at once and the turn goes on. Returns false when the
+    /// step no longer runs in the foreground, or when no CLI process runs.
+    /// </summary>
+    Task<bool> MoveStepToBackgroundAsync(string stepId);
+
+    /// <summary>
+    /// Stops one of the <see cref="BackgroundTasks"/>. The other tasks and the
+    /// turn, if one runs, go on. Returns false when the CLI did not take the
+    /// request.
+    /// </summary>
+    Task<bool> StopBackgroundTaskAsync(string taskId);
+
+    /// <summary>
+    /// The end of what a background shell task has written so far. Null when
+    /// the CLI could not say, e.g. for a subagent task.
+    /// </summary>
+    Task<BackgroundTaskOutput?> GetBackgroundTaskOutputAsync(string taskId);
+
+    /// <summary>
     /// The tasks the CLI is running in the background right now. Empty when
     /// none run, and after the CLI process stops, which ends them.
     /// </summary>

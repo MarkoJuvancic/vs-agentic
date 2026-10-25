@@ -62,6 +62,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private long _cacheCreationTokens;
     private long _contextTokens;
 
+    // Counts the readings of _contextTokens from the main conversation, so an
+    // answer about the context that comes back late does not replace a newer
+    // reading. Under _usageLock.
+    private long _contextReadings;
+
     // The window the CLI itself applies, from the last result event. Null until
     // then, and again after the model changes; the host then estimates it.
     private long? _contextWindowTokens;
@@ -85,6 +90,13 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private readonly List<TurnState> _turns = new List<TurnState>();
     private readonly object _activeTurnLock = new object();
 
+    // The CLI can also start a turn on its own, for example when a background
+    // command finishes and its notification wakes the model. No
+    // SendMessageAsync call waits on it: the dispatcher opens it on the turn's
+    // first message and closes it on the turn's result. It can run while our
+    // messages wait in the CLI's queue behind it. Guarded by _activeTurnLock.
+    private TurnState? _cliTurn;
+
     // The interrupt in flight, shared by every message that Stop cancels: one
     // request ends the running turn and cancels the queued messages with it.
     private Task<bool>? _interruptRequest;
@@ -100,8 +112,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     // ── Control requests ──────────────────────────────────────────────────
     // Everything we ask the running process (initialize, a model or effort
-    // change) goes through one channel. The dispatcher hands it each
-    // control_response. Replaced on every process start.
+    // change, plan usage) goes through one channel. The dispatcher hands it
+    // each control_response. Replaced on every process start.
     private volatile CliControlChannel _control;
 
     // What the running process said about itself: its initialize answer,
@@ -109,6 +121,13 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     // cleared on every process start; the CLI repeats them with each turn.
     private volatile CliProcessInfo? _processInfo;
     private volatile CliCapabilities _capabilities = CliCapabilities.None;
+
+    // ── Plan usage ────────────────────────────────────────────────────────
+    // Asked for after each turn. One request at a time; a CLI that answers
+    // with an error does not know the request, and is not asked again.
+    private int _planUsageRequestInFlight;
+    private volatile bool _planUsageUnsupported;
+    private readonly PlanUsageStore _planUsage = PlanUsageStore.Shared;
 
     // Set when the running process could not take a change. The next message
     // then restarts it, so the change still lands — but never mid-turn.
@@ -125,6 +144,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         _host = host;
         _logger = logger;
         _control = NewControlChannel();
+
+        // Another session's turn can move the plan readings; this session's
+        // meters follow. Detached in Dispose: the store outlives every session.
+        _planUsage.Changed += RaiseUsageChanged;
     }
 
     private CliControlChannel NewControlChannel() =>
@@ -282,8 +305,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         lock (_activeTurnLock)
         {
             // Set before the request goes out: the result can arrive before
-            // the answer to the interrupt has been read.
+            // the answer to the interrupt has been read. The interrupt aborts
+            // whatever the CLI runs, so a turn it started itself, which our
+            // messages may wait behind, ends the same way.
+            turn.Interrupted = true;
             foreach (var t in _turns) t.Interrupted = true;
+            if (_cliTurn is { } cliTurn) cliTurn.Interrupted = true;
 
             if (_interruptRequest is not { IsCompleted: false })
                 _interruptRequest = SendInterruptAsync();
@@ -341,6 +368,64 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
     }
 
+    // ── Turns the CLI starts on its own ───────────────────────────────────
+
+    public event Action? UnsolicitedTurnStarted;
+    public event Action? UnsolicitedTurnCompleted;
+
+    public void StopUnsolicitedTurn() => _ = StopCliTurnAsync();
+
+    private async Task StopCliTurnAsync()
+    {
+        try
+        {
+            TurnState? turn;
+            lock (_activeTurnLock) { turn = _cliTurn; }
+            if (turn == null) return;
+
+            await InterruptTurnAsync(turn).ConfigureAwait(false);
+
+            // The CLI did not close the turn in time. Stop showing it, so the
+            // session does not stay busy; the rest of it is not shown.
+            if (!turn.Ended.Task.IsCompleted)
+                EndCliTurn(turn);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[ClaudeCli] Stopping the CLI's own turn failed");
+        }
+    }
+
+    /// <summary>
+    /// Opens a turn for a message from the CLI that no turn of ours is
+    /// running to take. Called by the dispatcher only.
+    /// </summary>
+    private TurnState BeginCliTurn()
+    {
+        // No message of ours: the turn needs no uuid, and it is under way.
+        var turn = new TurnState(string.Empty, startedAtOnce: true);
+        lock (_activeTurnLock) { _cliTurn = turn; }
+
+        _logger.LogInformation("[ClaudeCli] CLI started a turn on its own");
+        try { UnsolicitedTurnStarted?.Invoke(); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] UnsolicitedTurnStarted handler threw"); }
+        return turn;
+    }
+
+    private void EndCliTurn(TurnState turn)
+    {
+        lock (_activeTurnLock)
+        {
+            if (!ReferenceEquals(_cliTurn, turn)) return;
+            _cliTurn = null;
+        }
+
+        FinalizeOpenBlocks(turn);
+        turn.End();
+        try { UnsolicitedTurnCompleted?.Invoke(); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] UnsolicitedTurnCompleted handler threw"); }
+    }
+
     private bool HasOpenTurns()
     {
         lock (_activeTurnLock) return _turns.Count > 0;
@@ -392,21 +477,37 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             // Process exited unexpectedly; tear down every open turn so callers unblock.
             TurnState[] turns;
-            lock (_activeTurnLock) { turns = _turns.ToArray(); _turns.Clear(); }
+            TurnState? cliTurn;
+            lock (_activeTurnLock) { turns = _turns.ToArray(); _turns.Clear(); cliTurn = _cliTurn; }
             foreach (var turn in turns)
                 FinalizeOpenBlocks(turn);
 
             // A CLI that dies before it writes a result (a bad argument, a
             // crash, an older CLI refusing to start) would otherwise end the
-            // turn with nothing on screen. Once, however many messages wait.
-            if (exit != null && turns.Any(t => !t.ResultReceived))
+            // turn with nothing on screen. Once, however many messages wait,
+            // and also for a turn the CLI started on its own.
+            if (exit != null && (cliTurn != null || turns.Any(t => !t.ResultReceived)))
                 EmitFatalError(DescribeExit(exit));
 
             foreach (var turn in turns)
                 turn.End();
+            if (cliTurn != null)
+                EndCliTurn(cliTurn);
 
             // Background tasks are children of the CLI and end with it.
             SetBackgroundTasks(Array.Empty<BackgroundTask>());
+
+            // The work ends without a notification, so mark the steps here.
+            string[] cutOff;
+            lock (_runningBackgroundSteps)
+            {
+                cutOff = _runningBackgroundSteps.ToArray();
+                _runningBackgroundSteps.Clear();
+            }
+            lock (_tasks) { _tasks.Clear(); }
+            foreach (var stepId in cutOff)
+                RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Stopped, "Ended with the Claude CLI process.", null);
+
             EndSubagents(includeBackground: true);
 
             // So is any answer it still owed us. Only this process's channel:
@@ -588,14 +689,19 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             case "command_lifecycle":
                 HandleCommandLifecycle(evt);
                 return;
+
+            case "rate_limit_event":
+                if (evt.TryGetProperty("rate_limit_info", out var rateLimit))
+                    _planUsage.ApplyRateLimitEvent(rateLimit);
+                return;
         }
     }
 
     /// <summary>
     /// The turn that events from the CLI belong to: the oldest of our
-    /// messages the CLI has started. Null while our messages still wait in
-    /// the CLI's queue behind a turn the CLI started itself; that turn's
-    /// events are not ours to show.
+    /// messages the CLI has started, until its result. Otherwise the turn the
+    /// CLI started on its own, if one is open: our messages may wait in the
+    /// CLI's queue behind it.
     ///
     /// A queued message the CLI reads into the running turn is started too,
     /// but the turn's steps stay with the message that began it, which is
@@ -605,7 +711,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private TurnState? RunningTurn()
     {
         lock (_activeTurnLock)
-            return _turns.Find(t => t.Started && !t.ResultReceived);
+            return _turns.Find(t => t.Started && !t.ResultReceived) ?? _cliTurn;
     }
 
     private TurnState? FindTurn(string? messageUuid)
@@ -619,11 +725,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// <see cref="MessageStarted"/> once per message.</summary>
     private void StartTurn(TurnState turn)
     {
-        TurnState? running;
+        TurnState? running, cliTurn;
         lock (_activeTurnLock)
         {
             if (turn.Started) return;
             running = _turns.Find(t => t.Started && !t.ResultReceived);
+            cliTurn = _cliTurn;
             turn.Started = true;
         }
         _logger.LogInformation("[ClaudeCli] Queued message started");
@@ -634,6 +741,14 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // saved only when the next block arrives, after the message.
         if (running is not null)
             FinalizeOpenBlocks(running);
+
+        // A turn of the CLI's own that is still open has taken our message
+        // in: its result will be ours, so it ends here.
+        if (cliTurn is not null)
+        {
+            _logger.LogInformation("[ClaudeCli] Our message joined the CLI's own turn");
+            EndCliTurn(cliTurn);
+        }
         RaiseMessageStarted(turn);
     }
 
@@ -741,31 +856,221 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
                 HandleTaskStarted(evt);
                 return;
 
+            case "task_updated":
+                HandleTaskUpdated(evt);
+                return;
+
             case "task_notification":
                 HandleTaskNotification(evt);
                 return;
         }
     }
 
-    // A subagent is a task as well. The CLI says here whether it runs in the
-    // background, which decides whether the end of the turn ends its steps.
-    private void HandleTaskStarted(JsonElement evt)
-    {
-        var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
-        if (toolUseId is null || !_subagents.TryGetValue(toolUseId, out var subagent)) return;
+    // ── Tasks ─────────────────────────────────────────────────────────────
+    // The CLI reports the work a tool call starts with task_started and, when
+    // it ends, task_notification. Both carry the tool_use_id, which is also
+    // the step id. Two things hang on a task: a subagent's own steps, and the
+    // background mark on the step that started it. Handled without an active
+    // turn, since the notification of background work usually arrives
+    // between turns.
 
-        subagent.InBackground = evt.TryGetProperty("is_backgrounded", out var bg) && bg.ValueKind == JsonValueKind.True;
+    private readonly HashSet<string> _runningBackgroundSteps = new HashSet<string>(StringComparer.Ordinal);
+
+    // Every task the CLI announced with task_started, by task id, until its
+    // task_notification. Foreground tasks too: the CLI can move one to the
+    // background later, and says so by task id alone (task_updated).
+    private readonly Dictionary<string, CliTask> _tasks = new Dictionary<string, CliTask>(StringComparer.Ordinal);
+
+    private sealed class CliTask
+    {
+        public string? StepId;
+        public string? Type;
+        public string? Description;
     }
 
-    // The subagent is done (completed, failed or stopped). Whatever step it
-    // left open will get no further event.
+    public event Action<string, BackgroundStepState, string?, string?>? StepBackgroundStateChanged;
+
+    public event Action<string>? StepCanMoveToBackground;
+
+    private void HandleTaskStarted(JsonElement evt)
+    {
+        var taskId = CliProcessInfo.ReadString(evt, "task_id");
+        var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
+        if (taskId is not null)
+        {
+            lock (_tasks)
+            {
+                _tasks[taskId] = new CliTask
+                {
+                    StepId = toolUseId,
+                    Type = CliProcessInfo.ReadString(evt, "task_type"),
+                    Description = CliProcessInfo.ReadString(evt, "description"),
+                };
+            }
+        }
+        if (toolUseId is null) return;
+
+        var inBackground = evt.TryGetProperty("is_backgrounded", out var bg) && bg.ValueKind == JsonValueKind.True;
+
+        // Whether a subagent runs in the background decides whether the end
+        // of the turn ends its steps.
+        if (_subagents.TryGetValue(toolUseId, out var subagent))
+            subagent.InBackground = inBackground;
+
+        // Foreground tasks (a subagent the turn waits on, a command that has
+        // run for a few seconds) report here too. Those the turn itself
+        // started can be moved to the background; one a subagent started
+        // belongs to a step the transcript does not show.
+        if (!inBackground)
+        {
+            if (CliProcessInfo.ReadString(evt, "parent_task_id") is null)
+                RaiseStepCanMoveToBackground(toolUseId);
+            return;
+        }
+
+        MarkStepInBackground(toolUseId);
+    }
+
+    // A foreground task the user (or Ctrl+B in another client) moved to the
+    // background. Only this event says so; task_started came earlier, with
+    // is_backgrounded false.
+    private void HandleTaskUpdated(JsonElement evt)
+    {
+        if (!evt.TryGetProperty("patch", out var patch) || patch.ValueKind != JsonValueKind.Object) return;
+        if (!patch.TryGetProperty("is_backgrounded", out var bg) || bg.ValueKind != JsonValueKind.True) return;
+
+        var taskId = CliProcessInfo.ReadString(evt, "task_id");
+        string? stepId = null;
+        lock (_tasks)
+        {
+            if (taskId is not null && _tasks.TryGetValue(taskId, out var task))
+                stepId = task.StepId;
+        }
+        if (string.IsNullOrEmpty(stepId)) return;
+
+        // A subagent moved out of the turn goes on after it, like one that
+        // started in the background.
+        if (_subagents.TryGetValue(stepId!, out var subagent))
+            subagent.InBackground = true;
+
+        MarkStepInBackground(stepId!);
+    }
+
+    private void MarkStepInBackground(string stepId)
+    {
+        lock (_runningBackgroundSteps)
+        {
+            if (!_runningBackgroundSteps.Add(stepId)) return;
+        }
+        RaiseStepBackgroundStateChanged(stepId, BackgroundStepState.Running, null, null);
+    }
+
     private void HandleTaskNotification(JsonElement evt)
     {
-        var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
-        if (toolUseId is null || !_subagents.TryGetValue(toolUseId, out var subagent)) return;
+        var taskId = CliProcessInfo.ReadString(evt, "task_id");
+        CliTask? task = null;
+        lock (_tasks)
+        {
+            if (taskId is not null && _tasks.TryGetValue(taskId, out task))
+                _tasks.Remove(taskId);
+        }
 
-        FinalizeOpenBlocks(subagent);
-        _subagents.TryRemove(toolUseId, out _);
+        var toolUseId = CliProcessInfo.ReadString(evt, "tool_use_id");
+        if (toolUseId is null) return;
+
+        // A subagent that is done (completed, failed or stopped) sends no
+        // further event for whatever step it left open.
+        if (_subagents.TryRemove(toolUseId, out var subagent))
+            FinalizeOpenBlocks(subagent);
+
+        lock (_runningBackgroundSteps)
+        {
+            // Not one we marked as running: a foreground task, or one from
+            // before the session was reopened.
+            if (!_runningBackgroundSteps.Remove(toolUseId)) return;
+        }
+
+        var state = CliProcessInfo.ReadString(evt, "status") switch
+        {
+            "completed" => BackgroundStepState.Completed,
+            "failed" => BackgroundStepState.Failed,
+            _ => BackgroundStepState.Stopped,
+        };
+        var summary = CliProcessInfo.ReadString(evt, "summary");
+
+        // For a task that was stopped, the CLI's summary is the task's
+        // description and nothing else, which reads as if it were still
+        // running.
+        if (state == BackgroundStepState.Stopped && summary is not null && summary == task?.Description)
+            summary = "Stopped: " + summary;
+
+        // A subagent's output file holds nothing a user would read (it was
+        // empty when measured); its steps are in the transcript.
+        var outputFile = task?.Type == "local_bash" ? CliProcessInfo.ReadString(evt, "output_file") : null;
+        if (string.IsNullOrEmpty(outputFile)) outputFile = null;
+
+        RaiseStepBackgroundStateChanged(toolUseId, state, summary, outputFile);
+    }
+
+    private void RaiseStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary, string? outputFile)
+    {
+        _logger.LogInformation("[ClaudeCli] Background step {Id}: {State}", stepId, state);
+        try { StepBackgroundStateChanged?.Invoke(stepId, state, summary, outputFile); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] StepBackgroundStateChanged handler threw"); }
+    }
+
+    private void RaiseStepCanMoveToBackground(string stepId)
+    {
+        try { StepCanMoveToBackground?.Invoke(stepId); }
+        catch (Exception ex) { _logger.LogError(ex, "[ClaudeCli] StepCanMoveToBackground handler threw"); }
+    }
+
+    public async Task<bool> MoveStepToBackgroundAsync(string stepId)
+    {
+        if (!_host.IsRunning) return false;
+
+        var reply = await _control.SendAsync(id => StreamJsonProtocol.BuildBackgroundTask(id, stepId)).ConfigureAwait(false);
+        if (!reply.Succeeded)
+        {
+            _logger.LogWarning("[ClaudeCli] background_tasks failed: {Error}", reply.Error);
+            return false;
+        }
+
+        // False when the step had finished, or was in the background already.
+        var moved = reply.Response is { ValueKind: JsonValueKind.Object } body
+            && body.TryGetProperty("backgrounded", out var b) && b.ValueKind == JsonValueKind.True;
+        _logger.LogInformation("[ClaudeCli] Move step {Id} to background: {Moved}", stepId, moved);
+        return moved;
+    }
+
+    public async Task<bool> StopBackgroundTaskAsync(string taskId)
+    {
+        if (!_host.IsRunning) return false;
+
+        // The CLI answers success for any id, known or not. The task's
+        // task_notification is what says it stopped.
+        var reply = await _control.SendAsync(id => StreamJsonProtocol.BuildStopTask(id, taskId)).ConfigureAwait(false);
+        if (!reply.Succeeded)
+            _logger.LogWarning("[ClaudeCli] stop_task failed: {Error}", reply.Error);
+        else
+            _logger.LogInformation("[ClaudeCli] Stop requested for background task {Id}", taskId);
+        return reply.Succeeded;
+    }
+
+    public async Task<BackgroundTaskOutput?> GetBackgroundTaskOutputAsync(string taskId)
+    {
+        if (!_host.IsRunning) return null;
+
+        var reply = await _control.SendAsync(id => StreamJsonProtocol.BuildGetTaskOutput(id, taskId)).ConfigureAwait(false);
+        if (!reply.Succeeded || reply.Response is not { ValueKind: JsonValueKind.Object } body)
+        {
+            _logger.LogDebug("[ClaudeCli] get_task_output failed: {Error}", reply.Error ?? "empty answer");
+            return null;
+        }
+
+        var output = CliProcessInfo.ReadString(body, "output") ?? "";
+        var truncated = body.TryGetProperty("truncated", out var t) && t.ValueKind == JsonValueKind.True;
+        return new BackgroundTaskOutput(output, truncated);
     }
 
     /// <summary>
@@ -784,12 +1089,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         }
     }
 
-    // Session notices go to the running turn, or to the first message still
-    // waiting for one.
+    // Session notices go to the turn that runs (ours, or the CLI's own), or
+    // to the first message still waiting for one.
     private TurnState? ActiveTurn()
     {
         lock (_activeTurnLock)
-            return _turns.Find(t => t.Started && !t.ResultReceived) ?? _turns.Find(t => !t.Started);
+            return _turns.Find(t => t.Started && !t.ResultReceived) ?? _cliTurn ?? _turns.Find(t => !t.Started);
     }
 
     // ── Session notices ───────────────────────────────────────────────────
@@ -913,6 +1218,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// </summary>
     private void HandleCompactBoundary(JsonElement evt)
     {
+        RefreshContextAfterCompaction();
+
         var turn = ActiveTurn();
         if (turn == null) return;
 
@@ -950,6 +1257,51 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         item.Title = title;
         item.Status = OutputItemStatus.Success;
         _outputListener.OnStepCompleted(item);
+    }
+
+    /// <summary>
+    /// After a compaction the context meter would keep the size from before it
+    /// until the next reply, since the reading comes from each reply's usage.
+    /// <c>post_tokens</c> is no stand-in: it counts the summary only, not the
+    /// system prompt and tools the next request carries as well. So the CLI is
+    /// asked, as <c>/context</c> would; its total equals what the meter reads
+    /// from a reply (CLI 2.1.303).
+    ///
+    /// Not awaited: the dispatcher calling this is what delivers the answer.
+    /// </summary>
+    private void RefreshContextAfterCompaction()
+    {
+        long readings;
+        lock (_usageLock) { readings = _contextReadings; }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var reply = await _control.SendAsync(StreamJsonProtocol.BuildGetContextUsage).ConfigureAwait(false);
+                if (!reply.Succeeded || reply.Response is not { ValueKind: JsonValueKind.Object } body)
+                {
+                    _logger.LogDebug("[ClaudeCli] get_context_usage failed: {Error}", reply.Error ?? "empty answer");
+                    return;
+                }
+
+                var total = ReadLong(body, "totalTokens");
+                if (total is not > 0) return;
+
+                lock (_usageLock)
+                {
+                    // A reply that came in meanwhile has the newer figure.
+                    if (_contextReadings != readings) return;
+                    _contextTokens = total.Value;
+                }
+                _logger.LogInformation("[ClaudeCli] Context after compaction: {Tokens} tokens", total.Value);
+                RaiseUsageChanged();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[ClaudeCli] Context refresh after compaction failed");
+            }
+        });
     }
 
     // Covers a boundary that never came: the line must not spin past the turn.
@@ -1171,8 +1523,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         if (FindTurn(CliProcessInfo.ReadString(evt, "user_message_uuid")) is { } answered)
             StartTurn(answered);
 
-        var turn = RunningTurn();
-        if (turn == null) return;
+        // A message no turn of ours is running to take starts a turn of the
+        // CLI's own.
+        var turn = RunningTurn() ?? BeginCliTurn();
 
         if (!evt.TryGetProperty("message", out var msg)) return;
 
@@ -1537,6 +1890,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
     private void HandleResultEvent(JsonElement evt)
     {
+        // Before the turn check: a turn this host did not start still spent
+        // from the plan.
+        RefreshPlanUsage();
+
         // Before the turn check: the state can change during a turn (a rate
         // limit starts a cooldown), whoever the result belongs to.
         if (FastModeStatus.Read(evt) is { } fast)
@@ -1560,15 +1917,28 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // must not end ours: our reply would then arrive after the call had
         // returned, and be lost. One result can end several of our messages:
         // those the CLI read into the turn while it ran are listed with the
-        // message that began it.
+        // message that began it. One that ends none of ours closes the CLI's
+        // own turn, if one is open.
         TurnState[] ended;
-        lock (_activeTurnLock) { ended = _turns.Where(t => !t.ResultReceived && ResultBelongsTo(evt, t)).ToArray(); }
+        TurnState? cliTurn;
+        lock (_activeTurnLock)
+        {
+            ended = _turns.Where(t => !t.ResultReceived && ResultBelongsTo(evt, t)).ToArray();
+            cliTurn = _cliTurn;
+        }
         if (ended.Length == 0)
         {
-            lock (_activeTurnLock) { if (_turns.Count == 0) return; }
-            _logger.LogInformation("[ClaudeCli] Result of another turn ({Origin}); waiting for ours",
-                evt.TryGetProperty("origin", out var o) ? CliProcessInfo.ReadString(o, "kind") ?? "unknown" : "no origin");
-            return;
+            bool waiting;
+            lock (_activeTurnLock) { waiting = _turns.Any(t => !t.ResultReceived); }
+            if (waiting)
+                _logger.LogInformation("[ClaudeCli] Result of another turn ({Origin}); waiting for ours",
+                    evt.TryGetProperty("origin", out var o) ? CliProcessInfo.ReadString(o, "kind") ?? "unknown" : "no origin");
+            if (cliTurn is null) return;
+            ended = new[] { cliTurn };
+        }
+        else
+        {
+            cliTurn = null;
         }
 
         // The steps belong to the first; the others own nothing to close.
@@ -1652,6 +2022,13 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             _cumulativeCostUsd = totalCost;
             RaiseUsageChanged();
+        }
+
+        // No call waits on the CLI's own turn; the session hears that it ended.
+        if (cliTurn is not null)
+        {
+            EndCliTurn(cliTurn);
+            return;
         }
 
         // Signal SendMessageAsync to return. A message listed here that never
@@ -2154,7 +2531,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             // Assigned, not accumulated: this is an occupancy reading, and it
             // drops back down when the CLI compacts the conversation.
             if (!fromSubagent)
+            {
                 _contextTokens = context;
+                _contextReadings++;
+            }
         }
 
         // Cache reads are charged at a fraction of a fresh input token, so
@@ -2252,6 +2632,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
 
         var (shortTotal, longTotal) = _usageLog.Totals(
             ClaudeUsagePlanDefaults.ShortWindow, ClaudeUsagePlanDefaults.LongWindow);
+        var limits = _planUsage.Read(DateTimeOffset.UtcNow);
 
         return new SessionUsage
         {
@@ -2265,6 +2646,9 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             LongWindowTokens = longTotal,
             ShortWindowBudget = _options.EffectiveFiveHourBudget,
             LongWindowBudget = _options.EffectiveWeeklyBudget,
+            ShortWindowLimit = limits.FiveHour,
+            LongWindowLimit = limits.SevenDay,
+            ModelLimits = limits.Models,
             CostUsd = _cumulativeCostUsd > 0 ? _cumulativeCostUsd : null,
         };
     }
@@ -2427,6 +2811,48 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private static bool IsUnknownRequest(string error) =>
         error.IndexOf("Unsupported control request subtype", StringComparison.OrdinalIgnoreCase) >= 0;
 
+    /// <summary>
+    /// Asks the running CLI for the plan rate limits, without waiting for the
+    /// answer. Called after each turn; the answer lands in
+    /// <see cref="PlanUsageStore"/>, which updates every session's meters.
+    /// </summary>
+    private void RefreshPlanUsage()
+    {
+        if (_planUsageUnsupported || !_host.IsRunning) return;
+        if (Interlocked.Exchange(ref _planUsageRequestInFlight, 1) == 1) return;
+
+        _ = RefreshPlanUsageAsync();
+    }
+
+    private async Task RefreshPlanUsageAsync()
+    {
+        try
+        {
+            EnsureDispatcherStarted();
+            var reply = await _control.SendAsync(StreamJsonProtocol.BuildGetUsage).ConfigureAwait(false);
+
+            if (reply.Succeeded)
+            {
+                if (reply.Response is { } body) _planUsage.ApplyUsageResponse(body);
+                return;
+            }
+
+            // A CLI that does not know get_usage (it is experimental in the
+            // SDK) is not asked again. Any other failure (no answer from a
+            // busy process, the process exiting) is tried after the next turn.
+            if (IsUnknownRequest(reply.Error!)) _planUsageUnsupported = true;
+            _logger.LogInformation("[ClaudeCli] Plan usage not available from the CLI: {Error}", reply.Error);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[ClaudeCli] Plan usage refresh failed");
+        }
+        finally
+        {
+            Volatile.Write(ref _planUsageRequestInFlight, 0);
+        }
+    }
+
     public void ClearHistory()
     {
         _cliSessionId = null;
@@ -2436,9 +2862,15 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             _inputTokens = _outputTokens = _cacheReadTokens = _cacheCreationTokens = 0;
             _contextTokens = 0;
+            _contextReadings++;
             _contextWindowTokens = null;
             _countedMessageIds.Clear();
         }
+
+        // Forget the running steps before the process goes, or the dispatcher
+        // reports them as stopped into the transcript that was just cleared.
+        lock (_runningBackgroundSteps) { _runningBackgroundSteps.Clear(); }
+        lock (_tasks) { _tasks.Clear(); }
 
         _host.Stop();
         lock (_dispatcherLock) { _dispatcherTask = null; }
@@ -2565,7 +2997,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         return false;
     }
 
-    public void Dispose() => _host.Dispose();
+    public void Dispose()
+    {
+        _planUsage.Changed -= RaiseUsageChanged;
+        _host.Dispose();
+    }
 
     /// <summary>
     /// The open steps of one conversation: the main one (a turn) or a
