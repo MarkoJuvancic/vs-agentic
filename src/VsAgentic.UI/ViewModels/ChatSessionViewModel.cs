@@ -1344,6 +1344,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 _chatService.AppliedEffortChanged -= OnChatServiceAppliedEffortChanged;
                 _chatService.FastModeChanged -= OnChatServiceFastModeChanged;
                 _chatService.BackgroundTasksChanged -= OnChatServiceBackgroundTasksChanged;
+                _chatService.PermissionModeChanged -= OnChatServicePermissionModeChanged;
+                _chatService.PermissionModeRejected -= OnChatServicePermissionModeRejected;
             }
             // Static: without this, a closed session stays reachable from the catalog.
             ClaudeModelCatalog.ReportedChanged -= OnReportedModelsChanged;

@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using Microsoft.Extensions.Logging;
 using VsAgentic.Services.Abstractions;
 using VsAgentic.Services.Configuration;
+using VsAgentic.Services.Services;
 
 namespace VsAgentic.UI.ViewModels;
 
@@ -57,7 +58,7 @@ public partial class ChatSessionViewModel
     private void OnChatServicePermissionModeChanged() => Dispatch(SyncPermissionMode);
 
     private void OnChatServicePermissionModeRejected(string error) => Dispatch(() =>
-        AddNotice($"_The permission mode was not changed. The CLI said: {error}_"));
+        AddNotice($"_The permission mode was not changed. The CLI said: {MarkdownText.Escape(error)}_"));
 
     /// <summary>Points the picker at what the service now asks for and reports.</summary>
     private void SyncPermissionMode()
