@@ -40,6 +40,75 @@ public partial class ChatSessionControl : UserControl
             new CustomPopupPlacement(new Point(targetSize.Width - popupSize.Width, -popupSize.Height), PopupPrimaryAxis.Horizontal),
             new CustomPopupPlacement(new Point(targetSize.Width - popupSize.Width, targetSize.Height), PopupPrimaryAxis.Horizontal),
         };
+
+        // The panel works from the keyboard: it opens with the focus on the
+        // session's model, the arrow keys and Tab move inside it, and Escape
+        // closes it. The content is laid out after Opened, hence the post.
+        ModelPickerPopup.Opened += (_, _) =>
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(FocusSelectedModelRow));
+        ModelPickerPopup.Closed += (_, _) =>
+        {
+            // Focus left in the closed panel would sit in a hidden window. A
+            // click elsewhere has already moved it, and keeps it there.
+            if (Keyboard.FocusedElement is not DependencyObject focused || IsInModelPickerPanel(focused))
+                ModelPickerToggle.Focus();
+        };
+        ModelPickerToggle.PreviewKeyDown += ModelPickerToggle_PreviewKeyDown;
+    }
+
+    // Alt+Down and F4 open the panel, as they open a dropdown list.
+    private void ModelPickerToggle_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        var altDown = e.Key == Key.System && e.SystemKey == Key.Down;
+        if ((altDown || e.Key == Key.F4) && ModelPickerToggle.IsChecked != true)
+        {
+            ModelPickerToggle.IsChecked = true;
+            e.Handled = true;
+        }
+    }
+
+    private void ModelPickerPanel_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        var altUp = e.Key == Key.System && e.SystemKey == Key.Up;
+        if (e.Key == Key.Escape || altUp || e.Key == Key.F4)
+        {
+            ModelPickerToggle.IsChecked = false;
+            ModelPickerToggle.Focus();
+            e.Handled = true;
+        }
+    }
+
+    private void FocusSelectedModelRow()
+    {
+        if (!ModelPickerPopup.IsOpen) return;
+
+        var row = FindDescendants<Button>(ModelPickerPanel)
+            .FirstOrDefault(b => b.DataContext is ModelOption { IsSelected: true } && b.IsVisible);
+        if (row is not null)
+            row.Focus();
+        else
+            ModelPickerPanel.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
+    }
+
+    private bool IsInModelPickerPanel(DependencyObject element)
+    {
+        for (var node = element; node is not null;
+             node = node is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node))
+        {
+            if (ReferenceEquals(node, ModelPickerPanel)) return true;
+        }
+        return false;
+    }
+
+    private static IEnumerable<T> FindDescendants<T>(DependencyObject root) where T : DependencyObject
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) yield return match;
+            foreach (var nested in FindDescendants<T>(child)) yield return nested;
+        }
     }
 
     public void Initialize(ChatSessionViewModel viewModel)
@@ -57,6 +126,12 @@ public partial class ChatSessionControl : UserControl
 
         viewModel.MessageBodySet += (id, body, mode) =>
             _ = ChatWebView.SetBodyAsync(id, body, mode);
+
+        viewModel.MessageBackgroundStateSet += (id, state, summary) =>
+            _ = ChatWebView.SetBackgroundStateAsync(id, state, summary);
+
+        viewModel.MessageCanMoveToBackground += (id) =>
+            _ = ChatWebView.SetCanMoveToBackgroundAsync(id);
 
         viewModel.MessageCompleted += (id) =>
             _ = ChatWebView.CompleteMessageAsync(id);
@@ -84,6 +159,9 @@ public partial class ChatSessionControl : UserControl
         // Ctrl+wheel and Ctrl+/- over the chat itself are seen by the browser,
         // not by WPF; the page relays them.
         ChatWebView.ZoomChangeRequested += OnZoomChangeRequested;
+
+        // The "Run in background" button on a running step.
+        ChatWebView.MoveToBackgroundRequested += OnMoveToBackgroundRequested;
 
         // Zoom is one setting across every chat window, so follow it rather
         // than own it. Applied without the toast here: this is the window
@@ -158,6 +236,7 @@ public partial class ChatSessionControl : UserControl
         VSColorTheme.ThemeChanged -= OnThemeChanged;
         ChatZoom.Changed -= OnZoomChanged;
         ChatWebView.ZoomChangeRequested -= OnZoomChangeRequested;
+        ChatWebView.MoveToBackgroundRequested -= OnMoveToBackgroundRequested;
         ChatWebView.Clicked -= OnChatClicked;
         ChatWebView.ContentFocusChanged -= OnChatContentFocusChanged;
         IsKeyboardFocusWithinChanged -= OnKeyboardFocusWithinChanged;
@@ -407,6 +486,22 @@ public partial class ChatSessionControl : UserControl
     public void FindNext(int direction) => _ = ChatWebView.FindNextAsync(direction);
 
     private void OnZoomChangeRequested(int step) => ChatZoom.Step(step);
+
+    private void OnMoveToBackgroundRequested(string stepId)
+    {
+        if (DataContext is ChatSessionViewModel vm)
+            _ = vm.MoveStepToBackgroundAsync(stepId);
+    }
+
+    // Read the output as the tooltip opens rather than on a timer: nobody
+    // looks at it most of the time, and each read is a request to the CLI.
+    // The tooltip shows the last text it had and changes when the answer
+    // comes, in a few milliseconds.
+    private void BackgroundTask_ToolTipOpening(object sender, ToolTipEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is BackgroundTaskItemViewModel task)
+            _ = task.RefreshOutputAsync();
+    }
 
     private void OnZoomChanged(double level)
     {
