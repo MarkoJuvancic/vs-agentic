@@ -343,7 +343,10 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         SessionInfo.HasBackgroundTasks = HasBackgroundTasks;
         SessionInfo.ActivityStatus = Activity switch
         {
-            SessionActivity.Idle => HasBackgroundTasks ? "Running in background" : string.Empty,
+            // Completed is a finished turn the user has not looked at yet; the
+            // row has nothing of its own to say about it.
+            SessionActivity.Idle or SessionActivity.Completed
+                => HasBackgroundTasks ? "Running in background" : string.Empty,
             // A login banner can come up outside a turn, where BusyStatus
             // would still read "Thinking...".
             SessionActivity.AwaitingUser when !IsBusy => "Waiting for you",
