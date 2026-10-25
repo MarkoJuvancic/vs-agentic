@@ -17,6 +17,7 @@ using Microsoft.Extensions.Options;
 using VsAgentic.Services.Abstractions;
 using VsAgentic.Services.ClaudeCli.Permissions;
 using VsAgentic.Services.Configuration;
+using VsAgentic.Services.Services;
 
 namespace VsAgentic.Services.ClaudeCli;
 
@@ -1424,7 +1425,11 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             if (reportOurs)
                 EmitError("Permission server not connected", DescribePermissionServerProblem(ours, reasons));
             if (newOthers.Count > 0 || newErrors.Count > 0)
-                EmitError("MCP servers not connected", DescribeMcpServerProblems(newOthers, newErrors, reasons));
+            {
+                var signInOnly = newErrors.Count == 0 && newOthers.All(s => s.NeedsSignIn);
+                EmitError(signInOnly ? "MCP servers need sign-in" : "MCP servers not connected",
+                    DescribeMcpServerProblems(newOthers, newErrors, reasons));
+            }
         });
     }
 
@@ -1461,7 +1466,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         sb.Append("VsAgentic's permission server (MCP server `").Append(ours.Name)
           .Append("`) did not connect to the Claude CLI. Status: ").Append(ours.Status);
         if (reasons.TryGetValue(ours.Name, out var reason))
-            sb.Append(" (").Append(reason).Append(')');
+            sb.Append(" (").Append(MarkdownText.Escape(reason)).Append(')');
         sb.AppendLine(".");
         sb.AppendLine();
         sb.AppendLine("Tools that need your approval cannot ask for it, and the CLI stops at the first one.");
@@ -1484,9 +1489,19 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             sb.AppendLine();
             foreach (var s in servers)
             {
-                sb.Append("- `").Append(s.Name).Append("`: ").Append(s.Status);
-                if (reasons.TryGetValue(s.Name, out var reason))
-                    sb.Append(" (").Append(reason).Append(')');
+                sb.Append("- ").Append(MarkdownText.Escape(s.Name)).Append(": ");
+                if (s.NeedsSignIn)
+                {
+                    // claude.ai connectors are not loaded, so this is a server
+                    // of the user's own that uses OAuth.
+                    sb.Append("needs sign-in. Run `claude`, then `/mcp`, to sign in.");
+                }
+                else
+                {
+                    sb.Append(MarkdownText.Escape(s.Status));
+                    if (reasons.TryGetValue(s.Name, out var reason))
+                        sb.Append(" (").Append(MarkdownText.Escape(reason)).Append(')');
+                }
                 sb.AppendLine();
             }
         }
@@ -1497,7 +1512,8 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             sb.AppendLine("The CLI skipped these MCP server configs:");
             sb.AppendLine();
             foreach (var e in errors)
-                sb.Append("- `").Append(e.Name).Append("`: ").AppendLine(e.Message ?? e.Type ?? "invalid config");
+                sb.Append("- ").Append(MarkdownText.Escape(e.Name)).Append(": ")
+                  .AppendLine(MarkdownText.Escape(e.Message ?? e.Type ?? "invalid config"));
         }
 
         return sb.ToString().TrimEnd();

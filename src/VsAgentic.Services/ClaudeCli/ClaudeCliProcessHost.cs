@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -134,7 +135,10 @@ public sealed class ClaudeCliProcessHost : IDisposable
         // Write the MCP config to a temp file. The CLI's --mcp-config flag
         // accepts a path more reliably than inline JSON, especially with the
         // quoting nightmare on Windows.
-        var mcpConfigJson = BuildMcpConfigJson(helperExePath, _pipeServer.PipeName, _pipeServer.Secret);
+        var userServers = _options.UseClaudeMcpServers
+            ? ReadUserMcpServers()
+            : Array.Empty<KeyValuePair<string, string>>();
+        var mcpConfigJson = BuildMcpConfigJson(helperExePath, _pipeServer.PipeName, _pipeServer.Secret, userServers);
         _mcpConfigTempPath = Path.Combine(Path.GetTempPath(), $"vsagentic-mcp-{Guid.NewGuid():N}.json");
         File.WriteAllText(_mcpConfigTempPath, mcpConfigJson, new UTF8Encoding(false));
         _logger.LogInformation("[ClaudeCli] MCP config written to: {Path}", _mcpConfigTempPath);
@@ -283,12 +287,13 @@ public sealed class ClaudeCliProcessHost : IDisposable
         }
 
         // Wire the MCP permission tool so the CLI asks us before running gated tools.
-        // --strict-mcp-config limits the session to our server. Without it the
-        // CLI also loads the user's own servers (user, project .mcp.json,
-        // claude.ai connectors), and ours is added alongside them.
+        // --strict-mcp-config limits the session to the servers in our config
+        // file: ours, and the user's own when they asked for them. Without it
+        // the CLI would also start the stdio servers in the project's .mcp.json,
+        // with no approval step in a -p session, so opening a repository would
+        // run its commands.
         sb.Append(" --permission-prompt-tool mcp__").Append(PermissionServerName).Append("__approval_prompt");
-        if (!_options.UseClaudeMcpServers)
-            sb.Append(" --strict-mcp-config");
+        sb.Append(" --strict-mcp-config");
         sb.Append(" --mcp-config ");
         sb.Append(EscapeArgument(mcpConfigPath));
 
@@ -327,7 +332,48 @@ public sealed class ClaudeCliProcessHost : IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "VsAgentic", "logs");
 
-    private static string BuildMcpConfigJson(string helperExePath, string pipeName, string secret)
+    /// <summary>
+    /// The user-scope MCP servers from the CLI's global config
+    /// (<c>~/.claude.json</c>, or <c>.claude.json</c> under
+    /// <c>CLAUDE_CONFIG_DIR</c>), as name and the server's JSON. Only the
+    /// user writes that file, unlike a repository's <c>.mcp.json</c>. Servers
+    /// added with the local or project scope are not read.
+    /// </summary>
+    private IReadOnlyList<KeyValuePair<string, string>> ReadUserMcpServers()
+    {
+        var configDir = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
+        var path = Path.Combine(
+            string.IsNullOrEmpty(configDir) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : configDir!,
+            ".claude.json");
+
+        var servers = new List<KeyValuePair<string, string>>();
+        try
+        {
+            if (!File.Exists(path)) return servers;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (!doc.RootElement.TryGetProperty("mcpServers", out var list) || list.ValueKind != JsonValueKind.Object)
+                return servers;
+
+            foreach (var server in list.EnumerateObject())
+            {
+                // Ours is the one the permission tool points at.
+                if (server.Name == PermissionServerName || server.Value.ValueKind != JsonValueKind.Object) continue;
+                servers.Add(new KeyValuePair<string, string>(server.Name, server.Value.GetRawText()));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _logger.LogWarning(ex, "[ClaudeCli] Could not read the user's MCP servers from {Path}", path);
+        }
+
+        _logger.LogInformation("[ClaudeCli] User MCP servers: {Servers}",
+            servers.Count == 0 ? "(none)" : string.Join(", ", servers.Select(s => s.Key)));
+        return servers;
+    }
+
+    private static string BuildMcpConfigJson(
+        string helperExePath, string pipeName, string secret,
+        IReadOnlyList<KeyValuePair<string, string>> userServers)
     {
         // The CLI spawns our helper exe as a stdio MCP server named "vsagentic"
         // and passes the pipe name + secret via env vars.
@@ -336,6 +382,10 @@ public sealed class ClaudeCliProcessHost : IDisposable
 
         var sb = new StringBuilder();
         sb.Append("{\"mcpServers\":{");
+        foreach (var server in userServers)
+        {
+            sb.Append(JsonSerializer.Serialize(server.Key)).Append(':').Append(server.Value).Append(',');
+        }
         sb.Append(JsonSerializer.Serialize(PermissionServerName));
         sb.Append(":{\"command\":");
         sb.Append(JsonSerializer.Serialize(helperExePath));

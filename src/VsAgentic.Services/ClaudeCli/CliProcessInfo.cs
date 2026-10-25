@@ -217,12 +217,16 @@ public sealed record CliMcpServer(string Name, string Status, string? Source)
     public const string Connected = "connected";
     public const string Pending = "pending";
     public const string Disabled = "disabled";
+    public const string NeedsAuth = "needs-auth";
 
     /// <summary>
     /// The model cannot use the server, and not because the user turned it
     /// off or because it is still starting.
     /// </summary>
     public bool IsUnavailable => Status != Connected && Status != Pending && Status != Disabled;
+
+    /// <summary>The server uses OAuth and the user has not signed in to it.</summary>
+    public bool NeedsSignIn => Status == NeedsAuth;
 }
 
 /// <summary>
