@@ -906,10 +906,13 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     // attached.
     //
     // While a turn runs, a message can go out only to a CLI that queues it
-    // and reports when a turn reads it.
+    // and reports when a turn reads it. Not while Stop waits for the turn to
+    // end: the message would join the calls Stop has cancelled.
     private bool CanSend() =>
-        (!IsBusy || _chatService?.CanQueueMessages == true)
+        (!IsBusy || (_chatService?.CanQueueMessages == true && !IsStopPending))
         && (!string.IsNullOrWhiteSpace(InputText) || PendingAttachments.Count > 0);
+
+    private bool IsStopPending => _sendCts?.IsCancellationRequested == true;
 
     /// <summary>
     /// Images and files pasted into the input box, waiting to go out with the
@@ -1207,6 +1210,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _sendCts?.Dispose();
                 _sendCts = null;
+                // A Stop that kept Send off is over.
+                SendCommand.NotifyCanExecuteChanged();
 
                 // A turn the CLI started on its own may already be running; it
                 // keeps the session busy and ends the turn when it completes.
@@ -1286,6 +1291,8 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     {
         try { _sendCts?.Cancel(); }
         catch { /* best effort — token may already be disposed */ }
+        // Off until the cancelled calls have returned (RunTurnAsync).
+        SendCommand.NotifyCanExecuteChanged();
 
         // Also with a sent message pending: its call interrupts the CLI only
         // while it still waits for its own result.
