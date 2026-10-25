@@ -555,11 +555,14 @@ var filePathRe = /(?:[A-Za-z]:[\\\/]|\.{0,2}\/|(?=[\w@]))(?:[\w\-\.@]+[\\\/])+[\
 // a space allowed between the words of a segment that has a separator on both
 // sides. The first segment of a relative path and the file name stay without
 // spaces, so a command followed by arguments (`dotnet build src/App/App.csproj`,
-// `git add src/a.cs src/b.cs`) is not read as one path.
+// `git add src/a.cs src/b.cs`) is not read as one path. In a segment with a
+// space no word starts with "-" or has a ".": an option (`python -m pkg/x.py`)
+// or a file name (`./build.sh --out bin/x.dll`, `src/a.cs src/b.cs`) then
+// cannot pass as a folder name.
 // A space may only be part of a path where something other than the pattern
 // says where the path ends: a code span, or double quotes. In running text
 // nothing does, and a greedy segment would eat the words between two paths.
-var wholePathRe = /^(?:(?:[A-Za-z]:[\\\/]|\.{0,2}\/)(?:[\w\-\.@]+(?: [\w\-\.@]+)*[\\\/])+|(?=[\w@])[\w\-\.@]+[\\\/](?:[\w\-\.@]+(?: [\w\-\.@]+)*[\\\/])*)[\w\-\.]+\.[a-z][a-zA-Z0-9]{0,9}(?::(\d+)(?:-\d+)?)?$/;
+var wholePathRe = /^(?:(?:[A-Za-z]:[\\\/]|\.{0,2}\/)(?:(?:[\w\-\.@]+|[\w@][\w\-@]*(?: [\w@][\w\-@]*)+)[\\\/])+|(?=[\w@])[\w\-\.@]+[\\\/](?:(?:[\w\-\.@]+|[\w@][\w\-@]*(?: [\w@][\w\-@]*)+)[\\\/])*)[\w\-\.]+\.[a-z][a-zA-Z0-9]{0,9}(?::(\d+)(?:-\d+)?)?$/;
 
 // Scans plain text for a bare path, or for a double-quoted run to try
 // wholePathRe on. Single quotes are left out on purpose: an apostrophe in
