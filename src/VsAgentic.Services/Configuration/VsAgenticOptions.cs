@@ -33,10 +33,10 @@ public class VsAgenticOptions
     public ClaudeEffort Effort { get; set; } = ClaudeEffort.Default;
 
     /// <summary>
-    /// Most the model may give a background command before the CLI stops it.
+    /// Most the model may give a shell command before the CLI stops it.
     /// Passed as <c>BASH_MAX_TIMEOUT_MS</c>; see <see cref="BackgroundCommandLimit"/>.
     /// </summary>
-    public BackgroundCommandLimit BackgroundCommandLimit { get; set; } = BackgroundCommandLimit.OneDay;
+    public BackgroundCommandLimit BackgroundCommandLimit { get; set; } = BackgroundCommandLimit.CliDefault;
 
     /// <summary>
     /// Subscription the rolling usage meters are sized against. Display only —

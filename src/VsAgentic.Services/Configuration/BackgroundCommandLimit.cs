@@ -13,7 +13,8 @@ namespace VsAgentic.Services.Configuration;
 /// session attended; the only exemption is the VS Code entrypoint, which we
 /// must not claim. What remains is <c>BASH_MAX_TIMEOUT_MS</c>: it raises the
 /// most the model may ask for, and the Bash tool description tells the model
-/// that number. The 30-minute default stays.
+/// that number. The 30-minute default stays. The variable is not limited to
+/// background commands: it raises the maximum of a foreground command as well.
 /// </summary>
 public enum BackgroundCommandLimit
 {

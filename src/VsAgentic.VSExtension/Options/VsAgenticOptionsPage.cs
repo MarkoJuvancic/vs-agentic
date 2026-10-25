@@ -54,9 +54,9 @@ public class VsAgenticOptionsPage : DialogPage
 
     [Category("Claude CLI")]
     [DisplayName("Background command limit")]
-    [Description("Most time Claude may give a background shell command (a dev server, a watcher) before the CLI stops it. The CLI treats this extension as an unattended session and stops such commands after 30 minutes unless Claude asks for longer, and allows at most 2 hours. This setting raises that maximum through BASH_MAX_TIMEOUT_MS; the 30-minute default stays. CliDefault leaves the variable alone. A value already set in the environment Visual Studio started with is kept. Applies to sessions started after the change.")]
-    [DefaultValue(BackgroundCommandLimit.OneDay)]
-    public BackgroundCommandLimit BackgroundCommandLimit { get; set; } = BackgroundCommandLimit.OneDay;
+    [Description("Most time Claude may give a shell command before the CLI stops it. The CLI treats this extension as an unattended session: it stops a background command (a dev server, a watcher) after 30 minutes unless Claude asks for longer, and allows at most 2 hours. The other values raise that maximum through BASH_MAX_TIMEOUT_MS. The CLI applies the variable to every Bash command, so the maximum for a foreground command rises as well. The default timeouts stay. CliDefault leaves the variable alone. A value already set in the environment Visual Studio started with is kept. Applies to sessions started after the change.")]
+    [DefaultValue(BackgroundCommandLimit.CliDefault)]
+    public BackgroundCommandLimit BackgroundCommandLimit { get; set; } = BackgroundCommandLimit.CliDefault;
 
     [Category("Claude CLI")]
     [DisplayName("Check for CLI updates")]
