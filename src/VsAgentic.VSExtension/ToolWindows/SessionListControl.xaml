@@ -321,7 +321,7 @@
                                 Margin="5,0,0,0"
                                 VerticalAlignment="Center"
                                 IsHitTestVisible="False" />
-            <TextBlock Text="Search sessions..."
+            <TextBlock Text="Search names and messages..."
                        Margin="24,0,0,0"
                        VerticalAlignment="Center"
                        IsHitTestVisible="False">
@@ -447,6 +447,15 @@
                                                Text="{Binding ActivityStatus, Mode=OneWay}" />
                                 </Grid>
                             </DockPanel>
+                            <!-- Where the search term occurs in the
+                                 conversation, with the term in bold. The runs
+                                 share one line on purpose: a line break between
+                                 them renders as a space, which would split a
+                                 match inside a word. -->
+                            <TextBlock x:Name="SearchHitText"
+                                       FontSize="11" Opacity="0.85"
+                                       Margin="0,2,0,0"
+                                       TextTrimming="CharacterEllipsis"><Run Text="{Binding SearchHit.Before, Mode=OneWay}" /><Run Text="{Binding SearchHit.Match, Mode=OneWay}" FontWeight="Bold" /><Run Text="{Binding SearchHit.After, Mode=OneWay}" /></TextBlock>
                         </StackPanel>
 
                         <!-- Quiet marker so a pinned row reads as pinned while
@@ -508,6 +517,9 @@
                             <Setter TargetName="ActivityText" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActivityText" Property="Opacity" Value="1" />
                             <Setter TargetName="ActivityText" Property="FontWeight" Value="SemiBold" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding SearchHit}" Value="{x:Null}">
+                            <Setter TargetName="SearchHitText" Property="Visibility" Value="Collapsed" />
                         </DataTrigger>
                         <DataTrigger Binding="{Binding IsPinned}" Value="True">
                             <Setter TargetName="PinIndicator" Property="Visibility" Value="Visible" />

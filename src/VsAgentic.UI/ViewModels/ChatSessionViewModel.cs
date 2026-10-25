@@ -455,6 +455,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     public event Action<string, string>? MessageContentUpdated;
     public event Action<string, OutputItemStatus, string>? MessageStatusUpdated;
     public event Action<string, string, OutputBodyMode>? MessageBodySet;
+    public event Action<string, BackgroundStepState, string?>? MessageBackgroundStateSet;
     public event Action<string>? MessageCompleted;
     public event Action? AllCleared;
 
@@ -525,37 +526,169 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         }
 
         chatService.LoginRequired += OnChatServiceLoginRequired;
+        chatService.UnsolicitedTurnStarted += OnUnsolicitedTurnStarted;
+        chatService.UnsolicitedTurnCompleted += OnUnsolicitedTurnCompleted;
         chatService.BackgroundTasksChanged += OnChatServiceBackgroundTasksChanged;
+        chatService.StepBackgroundStateChanged += OnChatServiceStepBackgroundStateChanged;
+        chatService.StepCanMoveToBackground += OnChatServiceStepCanMoveToBackground;
 
         InitializeUsage(chatService, options.Value);
     }
 
+    // True while a turn the CLI started on its own is running. It holds the
+    // session busy like a sent message does, so Send stays off and Stop works.
+    //
+    // Such a turn can start while SendAsync is still closing the turn before
+    // it (the service already has that turn's result). Whichever of the two
+    // ends last clears IsBusy and ends the turn in the view.
+    private bool _inUnsolicitedTurn;
+
+    private void OnUnsolicitedTurnStarted()
+    {
+        Dispatch(() =>
+        {
+            _inUnsolicitedTurn = true;
+            IsBusy = true;
+        });
+    }
+
+    private void OnUnsolicitedTurnCompleted()
+    {
+        Dispatch(() =>
+        {
+            if (!_inUnsolicitedTurn) return;
+            _inUnsolicitedTurn = false;
+            OnExchangeCompleted();
+
+            // A sent message still holds the session; SendAsync ends the turn.
+            if (_sendCts is not null) return;
+
+            IsBusy = false;
+            TurnEnded?.Invoke();
+            RequestScroll();
+        });
+    }
+
+    private void OnExchangeCompleted()
+    {
+        // Persist conversation history after each completed exchange
+        PersistConversationHistoryFireAndForget();
+
+        // Refresh cost and last activity in the session list
+        if (_chatService is not null && SessionInfo is not null)
+        {
+            SessionInfo.SessionCost = _chatService.GetSessionCost();
+            SessionInfo.LastActivity = DateTime.Now;
+        }
+    }
+
+    // The step id is the id the transcript already knows the step by, so the
+    // mark goes straight to the web view. It is not saved: a reopened session
+    // shows the step without it.
+    //
+    // When the work ends, a notice line with the outcome is added as well. The
+    // step may sit folded away, or far up the transcript; the notice lands
+    // where the user is reading, just above the answer the CLI wakes up to
+    // give. Unlike the mark it is saved with the session.
+    //
+    // A shell command's notice also carries the file the CLI wrote its output
+    // to, so the user can open the whole of it.
+    private void OnChatServiceStepBackgroundStateChanged(string stepId, BackgroundStepState state, string? summary, string? outputFile)
+    {
+        Dispatch(() =>
+        {
+            MessageBackgroundStateSet?.Invoke(stepId, state, summary);
+            if (state != BackgroundStepState.Running)
+                AddNotice(state, string.IsNullOrWhiteSpace(summary) ? $"Background command {state.ToString().ToLowerInvariant()}." : summary!, outputFile);
+        });
+    }
+
+    /// <summary>
+    /// Raised when a running step can be moved to the background. The view
+    /// offers it on the step; the argument is the step id.
+    /// </summary>
+    public event Action<string>? MessageCanMoveToBackground;
+
+    private void OnChatServiceStepCanMoveToBackground(string stepId) =>
+        Dispatch(() => MessageCanMoveToBackground?.Invoke(stepId));
+
+    /// <summary>
+    /// Moves a running step's command or subagent to the background. Called
+    /// from the step's button in the transcript.
+    /// </summary>
+    public async Task MoveStepToBackgroundAsync(string stepId)
+    {
+        if (_chatService is null) return;
+        try { await _chatService.MoveStepToBackgroundAsync(stepId); }
+        catch (Exception ex) { _logger.LogWarning(ex, "[VM] Could not move step {Id} to the background", stepId); }
+    }
+
+    private void AddNotice(BackgroundStepState state, string text, string? outputFile = null)
+    {
+        // The status picks the icon and color in the web view.
+        var status = state switch
+        {
+            BackgroundStepState.Completed => OutputItemStatus.Success,
+            BackgroundStepState.Failed => OutputItemStatus.Error,
+            _ => OutputItemStatus.Info,
+        };
+        var id = $"notice-{Guid.NewGuid():N}";
+        Items.Add(new ChatItemViewModel
+        {
+            Type = ChatItemType.Notice,
+            Content = text,
+            // A notice has no body of its own; the web view shows this as a
+            // link to the output.
+            Body = outputFile,
+            Status = status,
+            IsStreaming = false
+        });
+        MessageAdded?.Invoke(id, ChatItemType.Notice, new ChatMessageData
+        {
+            Id = id,
+            Type = ChatItemType.Notice.ToString(),
+            Content = text,
+            Body = outputFile,
+            Status = status.ToString()
+        });
+        RequestScroll();
+
+        PersistMessageFireAndForget(new PersistedMessage
+        {
+            ItemType = ChatItemType.Notice.ToString(),
+            Content = text,
+            Body = outputFile,
+            StatusText = status.ToString(),
+            CreatedUtc = DateTime.UtcNow
+        });
+    }
+
     // ── Background tasks ──────────────────────────────────────────────────
-    // Commands the CLI runs with run_in_background. They outlive the turn that
-    // started them, so the strip above the input box is the only place that
-    // shows they are still running.
+    // Commands and subagents the CLI runs in the background. They outlive the
+    // turn that started them, so the strip above the input box is the only
+    // place that shows they are still running, and where each can be stopped.
 
     [ObservableProperty]
     private bool _hasBackgroundTasks;
 
-    [ObservableProperty]
-    private string _backgroundTasksText = "";
-
-    [ObservableProperty]
-    private string _backgroundTasksTooltip = "";
+    /// <summary>One row per running background task, in the CLI's order.</summary>
+    public ObservableCollection<BackgroundTaskItemViewModel> BackgroundTaskItems { get; } = new();
 
     private void OnChatServiceBackgroundTasksChanged(IReadOnlyList<BackgroundTask> tasks)
     {
         Dispatch(() =>
         {
-            HasBackgroundTasks = tasks.Count > 0;
-            BackgroundTasksText = tasks.Count switch
+            // The CLI sends the whole list each time. Rows of tasks that are
+            // still running are kept, so a Stop already pressed stays pressed.
+            var kept = BackgroundTaskItems.ToDictionary(i => i.Id, StringComparer.Ordinal);
+            BackgroundTaskItems.Clear();
+            foreach (var task in tasks)
             {
-                0 => "",
-                1 => "Running in background: " + tasks[0].Description,
-                _ => $"{tasks.Count} tasks running in background",
-            };
-            BackgroundTasksTooltip = string.Join("\n", tasks.Select(t => "• " + t.Description));
+                BackgroundTaskItems.Add(kept.TryGetValue(task.Id, out var row)
+                    ? row
+                    : new BackgroundTaskItemViewModel(task, _chatService!, _logger));
+            }
+            HasBackgroundTasks = tasks.Count > 0;
         });
     }
 
@@ -995,15 +1128,7 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
                 // Output is handled by listener callbacks
             }
 
-            // Persist conversation history after each completed exchange
-            PersistConversationHistoryFireAndForget();
-
-            // Refresh cost and last activity in the session list
-            if (_chatService is not null && SessionInfo is not null)
-            {
-                SessionInfo.SessionCost = _chatService.GetSessionCost();
-                SessionInfo.LastActivity = DateTime.Now;
-            }
+            OnExchangeCompleted();
         }
         catch (OperationCanceledException)
         {
@@ -1043,8 +1168,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
         {
             _sendCts?.Dispose();
             _sendCts = null;
-            IsBusy = false;
-            TurnEnded?.Invoke();
+
+            // A turn the CLI started on its own may already be running; it
+            // keeps the session busy and ends the turn when it completes.
+            if (!_inUnsolicitedTurn)
+            {
+                IsBusy = false;
+                TurnEnded?.Invoke();
+            }
         }
         RequestScroll();
     }
@@ -1056,6 +1187,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
     {
         try { _sendCts?.Cancel(); }
         catch { /* best effort — token may already be disposed */ }
+
+        // Also with a sent message pending: its call interrupts the CLI only
+        // while it still waits for its own result.
+        if (_inUnsolicitedTurn)
+        {
+            try { _chatService?.StopUnsolicitedTurn(); }
+            catch (Exception ex) { _logger.LogError(ex, "[VM] Stop: StopUnsolicitedTurn failed"); }
+        }
 
         // The dispatcher loop blocks on the broker's TCS while a permission /
         // question banner is open. SendAsync's cancellation token doesn't reach
@@ -1385,9 +1524,13 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             {
                 _chatService.UsageChanged -= OnChatServiceUsageChanged;
                 _chatService.ModelChanged -= OnChatServiceModelChanged;
+                _chatService.UnsolicitedTurnStarted -= OnUnsolicitedTurnStarted;
+                _chatService.UnsolicitedTurnCompleted -= OnUnsolicitedTurnCompleted;
                 _chatService.AppliedEffortChanged -= OnChatServiceAppliedEffortChanged;
                 _chatService.FastModeChanged -= OnChatServiceFastModeChanged;
                 _chatService.BackgroundTasksChanged -= OnChatServiceBackgroundTasksChanged;
+                _chatService.StepBackgroundStateChanged -= OnChatServiceStepBackgroundStateChanged;
+                _chatService.StepCanMoveToBackground -= OnChatServiceStepCanMoveToBackground;
             }
             // Static: without this, a closed session stays reachable from the catalog.
             ClaudeModelCatalog.ReportedChanged -= OnReportedModelsChanged;
