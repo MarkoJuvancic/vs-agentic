@@ -53,6 +53,7 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
     // Shared by every chat: each one's MCP server offers these providers' tools.
     private readonly List<IIdeContextProvider> _ideContextProviders = new();
+    private DebuggerStateTracker? _debuggerState;
 
     // For "Add to VsAgentic Chat": the open chat windows, the one the user was
     // in last, and an editor context waiting for a window still being opened.
@@ -113,6 +114,22 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             _editorContext = new EditorContextTracker(
                 monitorSelection, () => editorOptions?.SuggestEditorContext ?? true);
             _ideContextProviders.Add(new EditorIdeContextProvider(_editorContext));
+        }
+
+        // Advised now rather than on Claude's first question: the exception
+        // that stopped the program is reported once, when it happens.
+        try
+        {
+            if (await GetServiceAsync(typeof(SVsShellDebugger)) is IVsDebugger debugger)
+            {
+                _debuggerState = new DebuggerStateTracker(debugger);
+                _ideContextProviders.Add(new DebuggerIdeContextProvider(_debuggerState));
+            }
+        }
+        catch (Exception ex)
+        {
+            // Claude then has no get_debug_context; everything else works.
+            System.Diagnostics.Debug.WriteLine($"VsAgentic: Could not follow the debugger: {ex}");
         }
 
         // Listen for solution open/close/switch events
@@ -913,6 +930,9 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
             _editorContext?.Dispose();
             _editorContext = null;
+
+            _debuggerState?.Dispose();
+            _debuggerState = null;
 
             if (_persistZoom is not null)
             {
