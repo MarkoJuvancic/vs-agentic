@@ -2,6 +2,7 @@ using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Debugger.Interop;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using VsAgentic.Services.IdeContext;
 
 namespace VsAgentic.VSExtension.IdeContext;
 
@@ -14,7 +15,7 @@ namespace VsAgentic.VSExtension.IdeContext;
 /// engines send when an exception stops the program. EnvDTE says only that
 /// the break was an exception, not which one.
 /// </summary>
-internal sealed class DebuggerStateTracker : IVsDebuggerEvents, IDebugEventCallback2, IDisposable
+internal sealed class DebuggerStateTracker : IDebuggerModeSource, IVsDebuggerEvents, IDebugEventCallback2, IDisposable
 {
     private readonly IVsDebugger _debugger;
     private readonly object _gate = new();
@@ -80,7 +81,25 @@ internal sealed class DebuggerStateTracker : IVsDebuggerEvents, IDebugEventCallb
                 _stopCounted = false;
             }
         }
+
+        ModeChanged?.Invoke();
     }
+
+    public DebuggerMode Mode
+    {
+        get
+        {
+            lock (_gate)
+                return _mode switch
+                {
+                    DBGMODE.DBGMODE_Break => DebuggerMode.Stopped,
+                    DBGMODE.DBGMODE_Run => DebuggerMode.Running,
+                    _ => DebuggerMode.NotDebugging,
+                };
+        }
+    }
+
+    public event Action? ModeChanged;
 
     // Called under _gate.
     private void StartBreak()

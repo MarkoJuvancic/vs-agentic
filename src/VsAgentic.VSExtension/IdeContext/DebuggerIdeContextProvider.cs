@@ -86,7 +86,8 @@ internal sealed class DebuggerIdeContextProvider : IIdeContextProvider
                   "maxValues":{"type":"integer","minimum":1,"maximum":30,"description":"Most values to return for arguments and for locals; past it, only names and types. Default 10."}
                 }}
                 """,
-                GetDebugContextAsync),
+                GetDebugContextAsync,
+                group: IdeToolGroups.Debugger),
         };
     }
 

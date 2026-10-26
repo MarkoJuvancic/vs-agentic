@@ -51,6 +51,12 @@ public sealed class IdeTool
     /// </summary>
     public bool IsReadOnly { get; }
 
+    /// <summary>
+    /// The switch that turns the tool off for one chat, e.g. <see cref="IdeToolGroups.Debugger"/>.
+    /// Null for a tool that is always on.
+    /// </summary>
+    public string? Group { get; }
+
     private readonly Func<JsonElement, CancellationToken, Task<IdeToolResult>> _invoke;
 
     public IdeTool(
@@ -59,11 +65,13 @@ public sealed class IdeTool
         string description,
         string inputSchemaJson,
         Func<JsonElement, CancellationToken, Task<IdeToolResult>> invoke,
-        bool isReadOnly = true)
+        bool isReadOnly = true,
+        string? group = null)
     {
         Name = name;
         Title = title;
         Description = description;
+        Group = group;
 
         // Re-emitted on one line: the tool list travels over the pipe as one
         // line, and a schema written across several lines would cut it short.
@@ -78,6 +86,16 @@ public sealed class IdeTool
     /// <param name="arguments">The arguments Claude passed; an empty object when it passed none.</param>
     public Task<IdeToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken)
         => _invoke(arguments, cancellationToken);
+}
+
+/// <summary>The groups of tools a chat can turn off.</summary>
+public static class IdeToolGroups
+{
+    /// <summary>
+    /// The debugger state: locals and arguments can hold data the user does
+    /// not want to send, so the chat has a switch for it.
+    /// </summary>
+    public const string Debugger = "debugger";
 }
 
 /// <summary>What a tool returns to Claude: text, usually JSON.</summary>

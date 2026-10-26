@@ -25,6 +25,7 @@ public sealed class IdeContextRegistry
     private readonly IReadOnlyList<IIdeContextProvider> _providers;
     private readonly Dictionary<string, IdeTool> _tools = new(StringComparer.Ordinal);
     private readonly ILogger _logger;
+    private readonly HashSet<string> _disabledGroups = new(StringComparer.Ordinal);
 
     public IdeContextRegistry(IEnumerable<IIdeContextProvider> providers, ILogger<IdeContextRegistry> logger)
     {
@@ -41,6 +42,28 @@ public sealed class IdeContextRegistry
     }
 
     public IReadOnlyCollection<IdeTool> Tools => _tools.Values;
+
+    /// <summary>
+    /// Turns a group of tools off or on for this chat. A turned-off tool stays
+    /// in the list the CLI got at start-up, but answers that the user turned it
+    /// off, and its provider is left out of the summaries.
+    /// </summary>
+    public void SetGroupEnabled(string group, bool enabled)
+    {
+        lock (_disabledGroups)
+        {
+            if (enabled) _disabledGroups.Remove(group);
+            else _disabledGroups.Add(group);
+        }
+        _logger.LogInformation("[IdeContext] Tool group '{Group}' {State}", group, enabled ? "on" : "off");
+    }
+
+    private bool IsDisabled(IdeTool tool)
+    {
+        if (tool.Group is not { } group) return false;
+        lock (_disabledGroups)
+            return _disabledGroups.Contains(group);
+    }
 
     /// <summary>The tool behind a name as the CLI reports it (with or without the MCP prefix).</summary>
     public IdeTool? Find(string name)
@@ -78,6 +101,18 @@ public sealed class IdeContextRegistry
         if (tool is null)
             return IdeToolResult.Error($"Unknown tool: {name}");
 
+        // Not an error: the tool works, the user chose not to share. Claude
+        // should say so rather than retry.
+        if (IsDisabled(tool))
+        {
+            return IdeToolResult.Success(JsonSerializer.Serialize(new
+            {
+                disabled = true,
+                note = "The user turned off this access for this chat with a switch below the message box. " +
+                       "Do not retry; if you need it, ask the user to turn the switch on.",
+            }));
+        }
+
         if (arguments.ValueKind != JsonValueKind.Object)
         {
             using var empty = JsonDocument.Parse("{}");
@@ -112,7 +147,10 @@ public sealed class IdeContextRegistry
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(budget);
 
-        var tasks = _providers.Select(p => SafeSummaryAsync(p, cts.Token)).ToList();
+        var tasks = _providers
+            .Where(p => !p.Tools.Any(IsDisabled))
+            .Select(p => SafeSummaryAsync(p, cts.Token))
+            .ToList();
         var all = Task.WhenAll(tasks);
         await Task.WhenAny(all, Task.Delay(budget, cancellationToken)).ConfigureAwait(false);
 

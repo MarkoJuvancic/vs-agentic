@@ -366,6 +366,8 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
         var vm = new ChatSessionViewModel(chatService, outputListener, optionsAccessor, permissionBroker, questionBroker, vmLogger);
         vm.EditorContextProvider = _editorContext;
+        vm.IdeContext = provider.GetService<IdeContextRegistry>();
+        vm.DebuggerModeSource = _debuggerState;
 
         // The status bar pickers only change this session; persisting the choice so
         // the next one starts the same way is the host's side of the deal.
