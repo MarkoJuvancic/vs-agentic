@@ -563,6 +563,12 @@ public static class PermissionRuleBuilder
     /// <c>&gt;&amp;2</c> point one handle at another and write nothing, so they
     /// do not count: the compound line in the issue ends in
     /// <c>git push … 2&gt;&amp;1 | tail -5</c>.
+    ///
+    /// Only a handle number or <c>-</c> after <c>&gt;&amp;</c> makes it that.
+    /// Any other word is a file name, and bash then writes both output and
+    /// errors into it: <c>git status &gt;&amp;out.txt</c> would otherwise get
+    /// <c>Bash(git status:*)</c>, a rule for a read that also covers the same
+    /// command writing a file.
     /// </summary>
     private static bool WritesToFile(string segment)
     {
@@ -589,9 +595,27 @@ public static class PermissionRuleBuilder
             var j = i + 1;
             while (j < segment.Length && (segment[j] == '>' || segment[j] == ' ' || segment[j] == '\t')) j++;
             if (j >= segment.Length || segment[j] != '&') return true;
+            if (!IsHandleTarget(segment, j + 1)) return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Whether the word starting at <paramref name="start"/>, after the
+    /// <c>&gt;&amp;</c> of a redirection, names a handle (<c>1</c>, <c>2</c>)
+    /// or closes one (<c>-</c>). Anything else, including no word at all, is
+    /// taken for a file.
+    /// </summary>
+    private static bool IsHandleTarget(string segment, int start)
+    {
+        while (start < segment.Length && (segment[start] == ' ' || segment[start] == '\t')) start++;
+
+        var end = start;
+        while (end < segment.Length && segment[end] != ' ' && segment[end] != '\t') end++;
+
+        var word = segment.Substring(start, end - start);
+        return word == "-" || (word.Length > 0 && word.All(c => c >= '0' && c <= '9'));
     }
 
     /// <summary>
