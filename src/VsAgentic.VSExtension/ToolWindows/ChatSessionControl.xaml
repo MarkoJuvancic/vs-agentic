@@ -468,7 +468,8 @@
                      The edge is the text box edge rather than the combo box edge
                      the rest of the window uses: a VS 2026 theme draws the latter
                      so faintly that the box blends into the chat. With the focus
-                     inside, it takes the accent, as the chat's own focus does. -->
+                     inside, it takes the theme accent, as the active window
+                     frame does. -->
                 <Border x:Name="PromptBox"
                         Grid.Row="1"
                         CornerRadius="4"
@@ -487,7 +488,7 @@
                             <Style.Triggers>
                                 <Trigger Property="IsKeyboardFocusWithin" Value="True">
                                     <Setter Property="BorderBrush"
-                                            Value="{DynamicResource {x:Static vs:VsBrushes.PanelHyperlinkKey}}"/>
+                                            Value="{DynamicResource {x:Static local:ChatSessionControl.PromptBoxFocusBorderKey}}"/>
                                 </Trigger>
                             </Style.Triggers>
                         </Style>
