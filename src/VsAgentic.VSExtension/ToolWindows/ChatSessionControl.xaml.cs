@@ -510,14 +510,22 @@ public partial class ChatSessionControl : UserControl
             }
         }
 
-        // Escape empties the input, which Ctrl+Z brings back. An open @ list
-        // takes the key first, in PreviewKeyDown, so the first Escape only
-        // closes it. In an empty box the key goes on to Visual Studio.
-        if (e.Key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None
-            && !string.IsNullOrEmpty(InputTextBox.Text))
+        // Escape empties the input, which Ctrl+Z brings back. The next Escape
+        // removes the attachments, so the text goes first and a second press
+        // is needed for both. An open @ list takes the key first, in
+        // PreviewKeyDown, so the first Escape only closes it. With nothing
+        // left the key goes on to Visual Studio.
+        if (e.Key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None)
         {
-            InputTextBox.Clear();
-            e.Handled = true;
+            if (!string.IsNullOrEmpty(InputTextBox.Text))
+            {
+                InputTextBox.Clear();
+                e.Handled = true;
+            }
+            else if (DataContext is ChatSessionViewModel vm && vm.RemoveAllAttachments())
+            {
+                e.Handled = true;
+            }
         }
     }
 
