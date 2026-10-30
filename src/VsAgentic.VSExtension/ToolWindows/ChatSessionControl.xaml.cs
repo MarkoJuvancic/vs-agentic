@@ -509,6 +509,16 @@ public partial class ChatSessionControl : UserControl
                 e.Handled = true;
             }
         }
+
+        // Escape empties the input, which Ctrl+Z brings back. An open @ list
+        // takes the key first, in PreviewKeyDown, so the first Escape only
+        // closes it. In an empty box the key goes on to Visual Studio.
+        if (e.Key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None
+            && !string.IsNullOrEmpty(InputTextBox.Text))
+        {
+            InputTextBox.Clear();
+            e.Handled = true;
+        }
     }
 
     private void ResizeGrip_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
