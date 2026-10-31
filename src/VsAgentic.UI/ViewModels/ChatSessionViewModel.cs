@@ -517,6 +517,17 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             if (!IsBusy) PromptSuggestion = suggestion;
         });
 
+    /// <summary>
+    /// Hides the suggested prompt. The CLI sends a new one after the next
+    /// turn. Returns false when there was none to hide.
+    /// </summary>
+    public bool DismissPromptSuggestion()
+    {
+        if (PromptSuggestion is null) return false;
+        PromptSuggestion = null;
+        return true;
+    }
+
     // True while a turn the CLI started on its own is running. It holds the
     // session busy like a sent message does, so Send stays off and Stop works.
     //

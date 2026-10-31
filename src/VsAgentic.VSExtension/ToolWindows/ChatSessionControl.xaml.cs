@@ -533,6 +533,15 @@ public partial class ChatSessionControl : UserControl
                 e.Handled = true;
             }
         }
+
+        // Escape in the empty box hides the suggested prompt. With no
+        // suggestion the key goes on to Visual Studio as before.
+        if (e.Key == Key.Escape && Keyboard.Modifiers == ModifierKeys.None &&
+            string.IsNullOrEmpty(InputTextBox.Text) &&
+            DataContext is ChatSessionViewModel session && session.DismissPromptSuggestion())
+        {
+            e.Handled = true;
+        }
     }
 
     private void ResizeGrip_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
