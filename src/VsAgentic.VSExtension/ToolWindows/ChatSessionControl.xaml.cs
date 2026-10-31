@@ -767,6 +767,19 @@ public partial class ChatSessionControl : UserControl
             }
         }
 
+        // Tab takes the suggested prompt into the empty box, ready to edit or
+        // send. With text in the box, or no suggestion, Tab moves focus on as
+        // before.
+        if (e.Key == Key.Tab && Keyboard.Modifiers == ModifierKeys.None &&
+            string.IsNullOrEmpty(InputTextBox.Text) &&
+            DataContext is ChatSessionViewModel { PromptSuggestion: { } suggestion })
+        {
+            InputTextBox.Text = suggestion;
+            InputTextBox.CaretIndex = suggestion.Length;
+            e.Handled = true;
+            return;
+        }
+
         if (!MentionPopup.IsOpen) return;
 
         switch (e.Key)
