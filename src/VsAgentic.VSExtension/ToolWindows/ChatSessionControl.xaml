@@ -601,13 +601,14 @@
                                  placeholder and where typed text starts, so it reads
                                  as the text Tab puts there. It wraps, unlike the
                                  placeholder: the CLI keeps it under 100 characters,
-                                 and the row grows to fit. -->
+                                 and the row grows to fit. The brush is set in code,
+                                 see ApplyPromptSuggestionBrush. -->
                             <TextBlock Margin="11,6,8,6"
                                        VerticalAlignment="Top"
                                        IsHitTestVisible="False"
                                        FontSize="13"
                                        TextWrapping="Wrap"
-                                       Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}">
+                                       Foreground="{DynamicResource PromptSuggestionBrush}">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Visibility" Value="Collapsed"/>
@@ -628,10 +629,10 @@
                                             Padding="4,0"
                                             CornerRadius="3"
                                             BorderThickness="1"
-                                            BorderBrush="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}">
+                                            BorderBrush="{DynamicResource PromptSuggestionBrush}">
                                         <TextBlock Text="Tab"
                                                    FontSize="11"
-                                                   Foreground="{DynamicResource {x:Static vs:VsBrushes.GrayTextKey}}"/>
+                                                   Foreground="{DynamicResource PromptSuggestionBrush}"/>
                                     </Border>
                                 </InlineUIContainer>
                             </TextBlock>

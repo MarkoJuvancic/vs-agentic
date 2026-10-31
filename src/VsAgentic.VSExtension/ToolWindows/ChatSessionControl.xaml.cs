@@ -274,7 +274,31 @@ public partial class ChatSessionControl : UserControl
     /// Points the prompt box and the status row at the shell palette, so that a
     /// theme which defines only the shell colors still reaches them.
     /// </summary>
-    private void ApplyShellBrushes() => ShellPalette.OverrideBrushes(this, ChromeBrushes);
+    private void ApplyShellBrushes()
+    {
+        ShellPalette.OverrideBrushes(this, ChromeBrushes);
+        ApplyPromptSuggestionBrush();
+    }
+
+    /// <summary>
+    /// The suggested prompt is a step dimmer than the placeholder, so it does
+    /// not read as text already typed: the shell's tertiary text against the
+    /// placeholder's secondary. Visual Studio 2022 has no tertiary text, and
+    /// there the suggestion takes the placeholder's color.
+    /// </summary>
+    private void ApplyPromptSuggestionBrush()
+    {
+        if (ShellPalette.TryGetColor("TextFillTertiary") is Color tertiary)
+        {
+            var brush = new SolidColorBrush(tertiary);
+            brush.Freeze();
+            Resources["PromptSuggestionBrush"] = brush;
+        }
+        else
+        {
+            Resources["PromptSuggestionBrush"] = FindResource(VsBrushes.GrayTextKey);
+        }
+    }
 
     private static System.Drawing.Color Blend(System.Drawing.Color from, System.Drawing.Color to, double amount)
     {
