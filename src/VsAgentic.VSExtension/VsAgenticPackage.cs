@@ -84,6 +84,8 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
 
         _sessionListViewModel = new SessionListViewModel();
         _sessionListViewModel.ConfirmDelete = ConfirmSessionDelete;
+        _sessionListViewModel.Forker = new VsAgentic.Services.ClaudeCli.ClaudeCliConversationForker();
+        _sessionListViewModel.ReportForkProblem = ReportForkProblem;
 
         // Initialize persistence and load saved sessions
         await InitializeSessionPersistenceAsync();
@@ -347,6 +349,21 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
             OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_SECOND);
 
         return answer == (int)Microsoft.VisualStudio.VSConstants.MessageBoxResult.IDYES;
+    }
+
+    private void ReportForkProblem(string message)
+    {
+        _ = JoinableTaskFactory.RunAsync(async () =>
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+            VsShellUtilities.ShowMessageBox(
+                this,
+                message,
+                "The chat was not forked",
+                OLEMSGICON.OLEMSGICON_INFO,
+                OLEMSGBUTTON.OLEMSGBUTTON_OK,
+                OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
+        });
     }
 
     private ChatSessionViewModel CreateChatViewModel()
@@ -638,6 +655,15 @@ public sealed class VsAgenticPackage : AsyncPackage, IVsSolutionEvents
                     // Link the view model to its session entry so cost updates flow back to the list
                     viewModel.SessionInfo = session;
                     viewModel.HasCustomTitle = session.HasCustomTitle;
+
+                    // "/fork" typed in the chat does what Fork in the list does.
+                    viewModel.ForkChat = () =>
+                    {
+                        var command = _instance?._sessionListViewModel?.ForkSessionCommand;
+                        if (command is null) return false;
+                        command.Execute(session);
+                        return true;
+                    };
 
                     // A rename in the session list flows into the open window:
                     // caption and generated-title suppression follow the new name.

@@ -1444,6 +1444,14 @@ public partial class ChatSessionViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // "/fork" opens a new chat in the session list, which the CLI knows
+        // nothing about.
+        if (PendingAttachments.Count == 0 && TryRunForkCommand(typed))
+        {
+            InputText = "";
+            return;
+        }
+
         InputText = "";
 
         var attachments = PendingAttachments.ToList();

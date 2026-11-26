@@ -47,6 +47,8 @@ public static class ServiceCollectionExtensions
                 IdeContext = sp.GetRequiredService<IdeContextRegistry>(),
             });
 
+        services.AddSingleton<IConversationForker, ClaudeCliConversationForker>();
+
         return services;
     }
 }

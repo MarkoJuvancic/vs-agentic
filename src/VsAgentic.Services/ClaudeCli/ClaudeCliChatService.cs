@@ -48,6 +48,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     private readonly ILogger _logger;
 
     private string? _cliSessionId;
+
+    // The conversation a forked chat starts from. Set only until the CLI
+    // reports the copy's own id in its init event.
+    private string? _forkFromSessionId;
     private decimal _cumulativeCostUsd;
     private Task? _dispatcherTask;
     private readonly object _dispatcherLock = new object();
@@ -232,7 +236,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             }
 
             var wasRunning = _host.IsRunning;
-            _host.SetResumeSessionId(_cliSessionId);
+            // A forked chat has no conversation of its own until the CLI
+            // reports one; until then it starts from a copy of the original's.
+            if (_cliSessionId is null && _forkFromSessionId is not null)
+                _host.SetResumeSessionId(_forkFromSessionId, fork: true);
+            else
+                _host.SetResumeSessionId(_cliSessionId);
             await _host.EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
             if (!wasRunning)
             {
@@ -1842,6 +1851,17 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         {
             _cliSessionId = init.SessionId;
             _logger.LogDebug("[ClaudeCli] Session started: {SessionId}", _cliSessionId);
+
+            // The copy exists now and has its own id, which every later start
+            // resumes. Going on with the original's id would write into it.
+            if (_forkFromSessionId is not null)
+            {
+                if (string.Equals(_forkFromSessionId, init.SessionId, StringComparison.OrdinalIgnoreCase))
+                    _logger.LogWarning("[ClaudeCli] Fork of {SessionId} kept the original id", init.SessionId);
+                else
+                    _logger.LogInformation("[ClaudeCli] Forked {Source} into {SessionId}", _forkFromSessionId, init.SessionId);
+                _forkFromSessionId = null;
+            }
         }
 
         // A CLI that predates the list sends none, which reads as no
@@ -2551,8 +2571,10 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         var missingConversation = isError && IsMissingConversation(evt);
         if (missingConversation)
         {
-            _logger.LogWarning("[ClaudeCli] CLI no longer has conversation {SessionId}; the next message starts a new one", _cliSessionId);
+            _logger.LogWarning("[ClaudeCli] CLI no longer has conversation {SessionId}; the next message starts a new one",
+                _cliSessionId ?? _forkFromSessionId);
             _cliSessionId = null;
+            _forkFromSessionId = null;
         }
 
         // A result for another message, or for a turn the CLI started itself,
@@ -3761,6 +3783,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     public void ClearHistory()
     {
         _cliSessionId = null;
+        _forkFromSessionId = null;
         _cumulativeCostUsd = 0;
 
         lock (_usageLock)
@@ -3796,7 +3819,12 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
         // session on the model it was created with, so the configured default is
         // not a valid stand-in when this session is reopened later. It is also the
         // only record of a [1m] variant: the CLI's transcript names the bare model.
-        return JsonSerializer.Serialize(new { cliSessionId = _cliSessionId, model = _currentModel });
+        return JsonSerializer.Serialize(new
+        {
+            cliSessionId = _cliSessionId,
+            model = _currentModel,
+            forkFromCliSessionId = _forkFromSessionId,
+        });
     }
 
     public void RestoreHistory(string serializedHistory)
@@ -3808,6 +3836,15 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
             {
                 _cliSessionId = sid.GetString();
                 _logger.LogInformation("[ClaudeCli] Restored session: {SessionId}", _cliSessionId);
+            }
+
+            // Written by ClaudeCliConversationForker for a chat that has not
+            // sent its first message yet.
+            if (doc.RootElement.TryGetProperty(ClaudeCliConversationForker.ForkFromProperty, out var fork)
+                && fork.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(fork.GetString()))
+            {
+                _forkFromSessionId = fork.GetString();
+                _logger.LogInformation("[ClaudeCli] Restored fork of session: {SessionId}", _forkFromSessionId);
             }
 
             // Sessions saved before this field existed do not have it; the host
@@ -3888,7 +3925,7 @@ public sealed class ClaudeCliChatService : IChatService, IDisposable
     /// </summary>
     private bool IsMissingConversation(JsonElement resultEvt)
     {
-        var resumedId = _cliSessionId;
+        var resumedId = _cliSessionId ?? _forkFromSessionId;
         if (string.IsNullOrEmpty(resumedId)) return false;
         if (!resultEvt.TryGetProperty("errors", out var errors) || errors.ValueKind != JsonValueKind.Array) return false;
 

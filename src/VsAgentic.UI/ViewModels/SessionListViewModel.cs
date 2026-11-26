@@ -377,6 +377,158 @@ public partial class SessionListViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Turns a chat's saved state into that of a fork. Set by the host; left
+    /// null, Fork does nothing.
+    /// </summary>
+    public IConversationForker? Forker { get; set; }
+
+    /// <summary>
+    /// Tells the user why a chat could not be forked. Set by the host, which
+    /// owns the dialog.
+    /// </summary>
+    public Action<string>? ReportForkProblem { get; set; }
+
+    /// <summary>Added to the name of a fork, as the session list shows it.</summary>
+    public const string ForkSuffix = " (fork)";
+
+    /// <summary>
+    /// Opens a new chat that continues this one's conversation from its last
+    /// answer. The transcript is copied, so the new chat shows what led up to
+    /// it; the agent copies its own side on the fork's first message. The
+    /// original stays as it is, and what either chat says afterwards stays out
+    /// of the other.
+    /// </summary>
+    /// <remarks>
+    /// The parameter is <c>object?</c> for the reason given on
+    /// <see cref="ArchiveSessionAsync"/>.
+    /// </remarks>
+    [RelayCommand]
+    private async Task ForkSessionAsync(object? parameter)
+    {
+        if (parameter is not SessionInfo source || source.IsArchived) return;
+        if (_sessionStore is null || _folderPath is null || Forker is null || !source.PersistedId.HasValue) return;
+
+        // A running turn has saved only part of what it did, and the copy
+        // would end in the middle of it.
+        if (source.Activity is SessionActivity.Busy or SessionActivity.AwaitingUser)
+        {
+            ReportForkProblem?.Invoke("Wait until the chat has finished its answer, then fork it.");
+            return;
+        }
+
+        var store = _sessionStore;
+        var folder = _folderPath;
+        var sourceId = source.PersistedId.Value;
+
+        string? forkHistory;
+        IReadOnlyList<PersistedMessage> messages;
+        try
+        {
+            forkHistory = Forker.CreateForkHistory(await store.GetConversationHistoryAsync(folder, sourceId));
+            messages = forkHistory is null
+                ? Array.Empty<PersistedMessage>()
+                : await store.GetMessagesAsync(folder, sourceId);
+        }
+        catch (Exception ex)
+        {
+            ReportForkProblem?.Invoke("The chat could not be read: " + ex.Message);
+            return;
+        }
+
+        if (forkHistory is null)
+        {
+            ReportForkProblem?.Invoke("This chat has no answer to continue from yet.");
+            return;
+        }
+
+        var name = source.Name + ForkSuffix;
+        SessionEntry entry;
+        try
+        {
+            entry = await store.CreateSessionAsync(folder, name);
+            if (source.HasCustomTitle)
+            {
+                entry.TitleIsCustom = true;
+                await store.UpdateSessionAsync(folder, entry);
+            }
+
+            await store.SaveMessagesAsync(folder, entry.Id, await CopyImagesAsync(store, folder, sourceId, entry.Id, messages));
+            await store.SaveConversationHistoryAsync(folder, entry.Id, forkHistory);
+        }
+        catch (Exception ex)
+        {
+            ReportForkProblem?.Invoke("The fork could not be saved: " + ex.Message);
+            return;
+        }
+
+        ShowArchived = false;
+
+        // Not active yet: the host restores the copied transcript when it
+        // opens a session that is not.
+        var fork = new SessionInfo
+        {
+            PersistedId = entry.Id,
+            Name = name,
+            HasCustomTitle = entry.TitleIsCustom,
+            LastActivity = DateTime.Now,
+        };
+
+        Sessions.Insert(Sessions.TakeWhile(s => s.IsPinned).Count(), fork);
+        SelectedSession = fork;
+        SessionOpenRequested?.Invoke(fork);
+    }
+
+    /// <summary>
+    /// Gives the copy its own image files, so deleting either chat leaves the
+    /// other's thumbnails. An image that cannot be copied is left out of the
+    /// copy, as a missing file is left out when a chat is restored.
+    /// </summary>
+    private static async Task<IReadOnlyList<PersistedMessage>> CopyImagesAsync(
+        ISessionStore store, string folder, int sourceId, int targetId, IReadOnlyList<PersistedMessage> messages)
+    {
+        var copies = new List<PersistedMessage>(messages.Count);
+        foreach (var message in messages)
+        {
+            List<string>? names = null;
+            if (message.ImageFileNames is { Count: > 0 })
+            {
+                names = new List<string>(message.ImageFileNames.Count);
+                foreach (var fileName in message.ImageFileNames)
+                {
+                    try
+                    {
+                        if (await store.GetImageAsync(folder, sourceId, fileName) is { } image)
+                            names.Add(await store.SaveImageAsync(folder, targetId, image));
+                    }
+                    catch
+                    {
+                        // One thumbnail short; the conversation still copies.
+                    }
+                }
+            }
+
+            copies.Add(new PersistedMessage
+            {
+                Ordinal = message.Ordinal,
+                ItemType = message.ItemType,
+                Content = message.Content,
+                ToolName = message.ToolName,
+                Title = message.Title,
+                Body = message.Body,
+                BodyMode = message.BodyMode,
+                ExpanderTitle = message.ExpanderTitle,
+                StatusText = message.StatusText,
+                StepId = message.StepId,
+                ParentId = message.ParentId,
+                ImageFileNames = names is { Count: > 0 } ? names : null,
+                FileChange = message.FileChange,
+                CreatedUtc = message.CreatedUtc,
+            });
+        }
+        return copies;
+    }
+
+    /// <summary>
     /// Pins or unpins a session and moves it to its place in the list.
     /// </summary>
     [RelayCommand]

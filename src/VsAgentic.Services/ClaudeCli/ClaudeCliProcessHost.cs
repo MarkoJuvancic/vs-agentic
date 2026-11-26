@@ -52,6 +52,7 @@ public sealed class ClaudeCliProcessHost : IDisposable
     private PermissionPipeServer? _pipeServer;
     private ProcessTreeJob? _processTree;
     private string? _resumeSessionId;
+    private bool _forkSession;
     private string? _mcpConfigTempPath;
 
     // The shutdown of the previous run. A new run waits for it, because the
@@ -89,11 +90,13 @@ public sealed class ClaudeCliProcessHost : IDisposable
 
     /// <summary>
     /// Set the session id to resume on the next start. Call before
-    /// <see cref="EnsureStartedAsync"/>.
+    /// <see cref="EnsureStartedAsync"/>. With <paramref name="fork"/> the CLI
+    /// continues a copy of that conversation under a new id.
     /// </summary>
-    public void SetResumeSessionId(string? sessionId)
+    public void SetResumeSessionId(string? sessionId, bool fork = false)
     {
         _resumeSessionId = sessionId;
+        _forkSession = fork && !string.IsNullOrEmpty(sessionId);
     }
 
     public async Task EnsureStartedAsync(CancellationToken cancellationToken)
@@ -332,6 +335,11 @@ public sealed class ClaudeCliProcessHost : IDisposable
         {
             sb.Append(" --resume ");
             sb.Append(EscapeArgument(_resumeSessionId!));
+
+            // The CLI copies the conversation under a new id and leaves the
+            // one it was given as it is.
+            if (_forkSession)
+                sb.Append(" --fork-session");
         }
 
         // Nudge Claude to actually use the AskUserQuestion tool instead of
